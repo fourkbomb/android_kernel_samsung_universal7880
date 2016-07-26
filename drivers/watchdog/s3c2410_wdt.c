@@ -140,6 +140,8 @@ struct s3c2410_wdt {
 	struct regmap *pmureg;
 };
 
+static struct s3c2410_wdt *s3c_wdt;
+
 static const struct s3c2410_wdt_variant drv_data_s3c2410 = {
 	.quirks = 0
 };
