@@ -38,7 +38,6 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/mmc/slot-gpio.h>
-#include <linux/smc.h>
 
 #include <soc/samsung/exynos-pm.h>
 #include <soc/samsung/exynos-powermode.h>
