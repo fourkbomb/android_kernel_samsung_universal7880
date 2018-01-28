@@ -143,7 +143,6 @@ struct vclk_dfs_ops {
 	int (*cpu_idle_clock_down)(unsigned int enable);
 	int (*ctrl_clk_gate)(unsigned int enable);
 	int (*get_margin_param)(unsigned int id);
-	int (*rate_lock)(unsigned int para);
 };
 
 struct pwrcal_vclk_dfs {
@@ -189,7 +188,7 @@ extern struct pwrcal_vclk_none vclk_0;
 
 /* Macro to define GRPGATE */
 #define GRPGATE(_id, _parent, _gates)		\
-struct pwrcal_vclk_grpgate vclk_##_id __attribute__((unused, aligned(8), section(".vclk_grpgate."))) = {	\
+struct pwrcal_vclk_grpgate vclk_##_id __attribute__((unused, aligned(8), section(".vclk_grpgate."#_id))) = {	\
 	.vclk.type	= vclk_group_grpgate,				\
 	.vclk.parent	= &((vclk_##_parent).vclk),	\
 	.vclk.ref_count	= 0,				\
@@ -200,7 +199,7 @@ struct pwrcal_vclk_grpgate vclk_##_id __attribute__((unused, aligned(8), section
 
 /* Macro to define PXMXDX */
 #define PXMXDX(_id, _parent, _clk_list)		\
-struct pwrcal_vclk_pxmxdx vclk_##_id __attribute__((unused, aligned(8), section(".vclk_pxmxdx."))) = {	\
+struct pwrcal_vclk_pxmxdx vclk_##_id __attribute__((unused, aligned(8), section(".vclk_pxmxdx."#_id))) = {	\
 	.vclk.type	= vclk_group_pxmxdx,				\
 	.vclk.parent	= &((vclk_##_parent).vclk),	\
 	.vclk.ref_count	= 0,				\
@@ -211,7 +210,7 @@ struct pwrcal_vclk_pxmxdx vclk_##_id __attribute__((unused, aligned(8), section(
 
 /* Macro to define UMUX */
 #define UMUX(_id, _parent, _umux)		\
-struct pwrcal_vclk_umux vclk_##_id __attribute__((unused, aligned(8), section(".vclk_umux."))) = {	\
+struct pwrcal_vclk_umux vclk_##_id __attribute__((unused, aligned(8), section(".vclk_umux."#_id))) = {	\
 	.vclk.type	= vclk_group_umux,				\
 	.vclk.parent	= &((vclk_##_parent).vclk),	\
 	.vclk.ref_count	= 0,				\
@@ -223,7 +222,7 @@ struct pwrcal_vclk_umux vclk_##_id __attribute__((unused, aligned(8), section(".
 /* Macro to define M1D1G1 */
 #define M1D1G1(_id, _parent,			\
 		_mux, _div, _gate, _extramux)		\
-struct pwrcal_vclk_m1d1g1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_m1d1g1."))) = {	\
+struct pwrcal_vclk_m1d1g1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_m1d1g1."#_id))) = {	\
 	.vclk.type	= vclk_group_m1d1g1,				\
 	.vclk.parent	= &((vclk_##_parent).vclk),	\
 	.vclk.ref_count	= 0,				\
@@ -237,7 +236,7 @@ struct pwrcal_vclk_m1d1g1 vclk_##_id __attribute__((unused, aligned(8), section(
 
 /* Macro to define P1 */
 #define P1(_id, _parent, _pll)			\
-struct pwrcal_vclk_p1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_p1."))) = {	\
+struct pwrcal_vclk_p1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_p1."#_id))) = {	\
 	.vclk.type	= vclk_group_p1,				\
 	.vclk.parent	= &((vclk_##_parent).vclk),	\
 	.vclk.ref_count	= 0,				\
@@ -248,7 +247,7 @@ struct pwrcal_vclk_p1 vclk_##_id __attribute__((unused, aligned(8), section(".vc
 
 /* Macro to define M1 */
 #define M1(_id, _parent, _mux)			\
-struct pwrcal_vclk_m1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_m1."))) = {	\
+struct pwrcal_vclk_m1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_m1."#_id))) = {	\
 	.vclk.type	= vclk_group_m1,				\
 	.vclk.parent	= &((vclk_##_parent).vclk),	\
 	.vclk.ref_count	= 0,				\
@@ -259,7 +258,7 @@ struct pwrcal_vclk_m1 vclk_##_id __attribute__((unused, aligned(8), section(".vc
 
 /* Macro to define D1 */
 #define D1(_id, _parent, _div)			\
-struct pwrcal_vclk_d1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_d1."))) = {	\
+struct pwrcal_vclk_d1 vclk_##_id __attribute__((unused, aligned(8), section(".vclk_d1."#_id))) = {	\
 	.vclk.type	= vclk_group_d1,				\
 	.vclk.parent	= &((vclk_##_parent).vclk),	\
 	.vclk.ref_count	= 0,				\
@@ -268,7 +267,7 @@ struct pwrcal_vclk_d1 vclk_##_id __attribute__((unused, aligned(8), section(".vc
 	.div		= &((clk_##_div).clk),		\
 }
 
-#define DFS(_id)	struct pwrcal_vclk_dfs vclk_##_id __attribute__((unused, aligned(8), section(".vclk_dfs.")))
+#define DFS(_id)	struct pwrcal_vclk_dfs vclk_##_id __attribute__((unused, aligned(8), section(".vclk_dfs."#_id)))
 
 
 extern struct pwrcal_vclk_grpgate *vclk_grpgate_list[];

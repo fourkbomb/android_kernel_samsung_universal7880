@@ -168,6 +168,14 @@ extern int nr_threads;
 DECLARE_PER_CPU(unsigned long, process_counts);
 extern int nr_processes(void);
 extern unsigned long nr_running(void);
+#ifdef CONFIG_SCHED_AVG_NR_RUNNING
+extern int avg_nr_running(void);
+#else
+static inline unsigned long avg_nr_running(void)
+{
+	return nr_running();
+}
+#endif
 extern bool single_task_running(void);
 extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(int cpu);
@@ -328,7 +336,12 @@ extern void show_regs(struct pt_regs *);
  * task), SP is the stack pointer of the first frame that should be shown in the back
  * trace (or NULL if the entire call-chain of the task should be shown).
  */
+
 extern void show_stack(struct task_struct *task, unsigned long *sp);
+
+#ifdef CONFIG_KFAULT_AUTO_SUMMARY
+extern void show_stack_auto_summary(struct task_struct *task, unsigned long *sp);
+#endif
 
 void io_schedule(void);
 long io_schedule_timeout(long timeout);
@@ -764,6 +777,8 @@ struct user_struct {
 	unsigned long mq_bytes;	/* How many bytes can be allocated to mqueue? */
 #endif
 	unsigned long locked_shm; /* How many pages of mlocked shm ? */
+	unsigned long unix_inflight;	/* How many files in flight in unix sockets */
+	atomic_long_t pipe_bufs;  /* how many pages are allocated in pipe buffers */
 
 #ifdef CONFIG_KEYS
 	struct key *uid_keyring;	/* UID specific keyring */
@@ -884,7 +899,6 @@ enum cpu_idle_type {
 #define SD_PREFER_SIBLING	0x1000	/* Prefer to place tasks in a sibling domain */
 #define SD_OVERLAP		0x2000	/* sched_domains of this level overlap */
 #define SD_NUMA			0x4000	/* cross-node balancing */
-#define SD_NO_LOAD_BALANCE	0x8000	/* flag for hmp scheduler */
 
 #ifdef CONFIG_SCHED_SMT
 static inline int cpu_smt_flags(void)
@@ -1116,9 +1130,6 @@ struct sched_avg {
 #ifdef CONFIG_SCHED_HMP
 	u64 hmp_last_up_migration;
 	u64 hmp_last_down_migration;
-#ifdef CONFIG_HP_EVENT_HMP_SYSTEM_LOAD
-	bool is_big_thread;
-#endif
 #endif
 	u32 usage_avg_sum;
 };
@@ -1401,22 +1412,12 @@ struct task_struct {
 	struct list_head thread_group;
 	struct list_head thread_node;
 
-#ifdef CONFIG_HP_EVENT_THREAD_GROUP
-	unsigned long thread_group_load;
-	int nr_thread_group;
-	raw_spinlock_t thread_group_lock;
-	bool hp_boost_requested;	/* This task requested hotplug boost */
-	bool applied_to_group_load;
-	bool member_of_group;
-	unsigned long group_applied_load;
-#endif
 	struct completion *vfork_done;		/* for vfork() */
 	int __user *set_child_tid;		/* CLONE_CHILD_SETTID */
 	int __user *clear_child_tid;		/* CLONE_CHILD_CLEARTID */
 
 	cputime_t utime, stime, utimescaled, stimescaled;
 	cputime_t gtime;
-	unsigned long long cpu_power;
 #ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
 	struct cputime prev_cputime;
 #endif
@@ -1711,6 +1712,9 @@ struct task_struct {
 	unsigned int	sequential_io;
 	unsigned int	sequential_io_avg;
 #endif
+#ifdef CONFIG_SDP
+	unsigned int sensitive;
+#endif
 };
 
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
@@ -1815,13 +1819,7 @@ static inline pid_t task_tgid_nr(struct task_struct *tsk)
 	return tsk->tgid;
 }
 
-pid_t task_tgid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns);
-
-static inline pid_t task_tgid_vnr(struct task_struct *tsk)
-{
-	return pid_vnr(task_tgid(tsk));
-}
-
+static pid_t task_tgid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns);
 
 static inline int pid_alive(const struct task_struct *p);
 static inline pid_t task_ppid_nr_ns(const struct task_struct *tsk, struct pid_namespace *ns)
@@ -1862,6 +1860,16 @@ static inline pid_t task_session_nr_ns(struct task_struct *tsk,
 static inline pid_t task_session_vnr(struct task_struct *tsk)
 {
 	return __task_pid_nr_ns(tsk, PIDTYPE_SID, NULL);
+}
+
+static inline pid_t task_tgid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns)
+{
+	return __task_pid_nr_ns(tsk, __PIDTYPE_TGID, ns);
+}
+
+static inline pid_t task_tgid_vnr(struct task_struct *tsk)
+{
+	return __task_pid_nr_ns(tsk, __PIDTYPE_TGID, NULL);
 }
 
 /* obsolete, do not use */
@@ -3084,27 +3092,4 @@ static inline unsigned long rlimit_max(unsigned int limit)
 	return task_rlimit_max(current, limit);
 }
 
-#if defined(CONFIG_HP_EVENT_THREAD_GROUP) || defined(CONFIG_HP_EVENT_HMP_SYSTEM_LOAD)
-void hp_event_enqueue_entity(struct sched_entity *se, int flags);
-void hp_event_dequeue_entity(struct sched_entity *se, int flags);
-void hp_event_update_entity_load(struct sched_entity *se);
-void hp_event_switched_from(struct sched_entity *se);
-void hp_event_do_exit(struct task_struct *p);
-void hp_event_update_rq_load(int cpu);
-extern unsigned int *pcpu_efficiency;
-#else
-static inline void hp_event_update_entity_load(struct sched_entity *se) { };
-static inline void hp_event_enqueue_entity(struct sched_entity *se, int flags) { };
-static inline void hp_event_dequeue_entity(struct sched_entity *se, int flags) { };
-static inline void hp_event_switched_from(struct sched_entity *se) { };
-static inline void hp_event_do_exit(struct task_struct *p) { };
-static inline void hp_event_update_rq_load(int cpu) { };
-#endif
-
-#if defined(CONFIG_HP_EVENT_HMP_SYSTEM_LOAD)
-extern int hp_sysload_to_quad_ratio;
-extern int hp_sysload_to_dual_ratio;
-extern int hp_sysload_param_calc(void);
-extern int hp_little_multiplier_ratio;
-#endif
 #endif

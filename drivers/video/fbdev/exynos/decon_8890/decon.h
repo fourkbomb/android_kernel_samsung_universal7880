@@ -35,10 +35,6 @@ extern struct decon_device *decon_s_drvdata;
 extern struct decon_device *decon_t_drvdata;
 extern int decon_log_level;
 
-extern struct decon_bts decon_bts_control;
-extern struct decon_init_bts decon_init_bts_control;
-extern struct decon_bts2 decon_bts2_control;
-
 #define NUM_DECON_IPS		(3)
 #define DRIVER_NAME		"decon"
 #define MAX_NAME_SIZE		32
@@ -49,7 +45,7 @@ extern struct decon_bts2 decon_bts2_control;
 #define MAX_BUF_PLANE_CNT	3
 #define DECON_ENTER_LPD_CNT	3
 #define MIN_BLK_MODE_WIDTH	144
-#define MIN_BLK_MODE_HEIGHT	16
+#define MIN_BLK_MODE_HEIGHT	10
 
 #define VSYNC_TIMEOUT_MSEC	200
 #define MAX_BW_PER_WINDOW	(2560 * 1600 * 4 * 60)
@@ -65,8 +61,6 @@ extern struct decon_bts2 decon_bts2_control;
 /* BTS driver defines the Threshold */
 #define	NO_CNT_TH		10
 #endif
-
-#define DECON_PIX_PER_CLK	2
 
 #define UNDERRUN_FILTER_INTERVAL_MS    100
 #define UNDERRUN_FILTER_INIT           0
@@ -115,28 +109,9 @@ extern struct decon_bts2 decon_bts2_control;
 
 #define decon_dbg(fmt, ...)							\
 	do {									\
-		if (decon_log_level >= 8)					\
-			pr_info(pr_fmt(fmt), ##__VA_ARGS__);			\
-	} while (0)
-
-#define decon_bts(fmt, ...)							\
-	do {									\
-		if (decon_log_level >= 7)					\
-			pr_info("[BTS]"pr_fmt(fmt), ##__VA_ARGS__);			\
-	} while (0)
-
-#define decon_cfw_dbg(fmt, ...)							\
-	do {									\
 		if (decon_log_level >= 7)					\
 			pr_info(pr_fmt(fmt), ##__VA_ARGS__);			\
 	} while (0)
-
-#define call_bts_ops(q, op, args...)				\
-	(((q)->bts_ops->op) ? ((q)->bts_ops->op(args)) : 0)
-
-#define call_init_ops(q, op, args...)				\
-		(((q)->bts_init_ops->op) ? ((q)->bts_init_ops->op(args)) : 0)
-
 
 /*
  * DECON_STATE_ON : disp power on, decon/dsim clock on & lcd on
@@ -159,8 +134,6 @@ struct exynos_decon_platdata {
 	enum decon_trig_mode	trig_mode;
 	enum decon_dsi_mode	dsi_mode;
 	enum decon_output_type	out_type;
-	int	out_idx;	/* dsim index */
-	int	out1_idx;	/* dsim index for dual DSI */
 	int	max_win;
 	int	default_win;
 };
@@ -308,9 +281,6 @@ enum decon_pixel_format {
 	DECON_PIXEL_FORMAT_YVU420,
 	DECON_PIXEL_FORMAT_YUV420M,
 	DECON_PIXEL_FORMAT_YVU420M,
-	/* YUV - support for single plane */
-	DECON_PIXEL_FORMAT_NV12N,
-	DECON_PIXEL_FORMAT_NV12N_10B,
 
 	DECON_PIXEL_FORMAT_MAX,
 };
@@ -344,14 +314,6 @@ enum vpp_stop_status {
 	VPP_STOP_NORMAL = 0x0,
 	VPP_STOP_LPD,
 	VPP_STOP_ERR,
-};
-
-enum vpp_port_num {
-	VPP_PORT_NUM0 = 0,
-	VPP_PORT_NUM1,
-	VPP_PORT_NUM2,
-	VPP_PORT_NUM3,
-	VPP_PORT_MAX,
 };
 
 struct vpp_params {
@@ -400,14 +362,6 @@ struct decon_win_config {
 	/* destination OSD coordinates */
 	struct decon_frame dst;
 	bool protection;
-	bool compression;
-};
-
-struct decon_sbuf_data {
-	struct list_head	list;
-	unsigned long		addr;
-	unsigned int		len;
-	unsigned int		id;
 };
 
 struct decon_reg_data {
@@ -428,7 +382,6 @@ struct decon_reg_data {
 	bool				need_update;
 #endif
 	bool				protection[MAX_DECON_WIN];
-	struct list_head		sbuf_pend_list;
 };
 
 struct decon_win_config_data {
@@ -452,7 +405,6 @@ struct decon_underrun_stat {
 	int	chmap;
 	int	fifo_level;
 	int	underrun_cnt;
-	int	total_underrun_cnt;
 	unsigned long aclk;
 	unsigned long lh_disp0;
 	unsigned long mif_pll;
@@ -464,31 +416,6 @@ struct disp_ss_size_info {
 	u32 h_in;
 	u32 w_out;
 	u32 h_out;
-};
-
-struct decon_init_bts {
-	void	(*bts_add)(struct decon_device *decon);
-	void	(*bts_set_init)(struct decon_device *decon);
-	void	(*bts_release_init)(struct decon_device *decon);
-	void	(*bts_remove)(struct decon_device *decon);
-};
-
-struct vpp_dev;
-
-struct decon_bts {
-	void	(*bts_get_bw)(struct vpp_dev *vpp);
-	void	(*bts_set_calc_bw)(struct vpp_dev *vpp);
-	void	(*bts_set_zero_bw)(struct vpp_dev *vpp);
-	void	(*bts_set_rot_mif)(struct vpp_dev *vpp);
-};
-
-struct decon_bts2 {
-	void (*bts_init)(struct decon_device *decon);
-	void (*bts_calc_bw)(struct decon_device *decon);
-	void (*bts_update_bw)(struct decon_device *decon, u32 is_after);
-	void (*bts_release_bw)(struct decon_device *decon);
-	void (*bts_release_vpp)(struct vpp_dev *vpp);
-	void (*bts_deinit)(struct decon_device *decon);
 };
 
 #ifdef CONFIG_DECON_EVENT_LOG
@@ -576,8 +503,6 @@ struct disp_log_vpp {
 	u32 id;
 	u32 start_cnt;
 	u32 done_cnt;
-	u32 width;
-	u32 height;
 };
 
 /**
@@ -601,7 +526,7 @@ struct disp_ss_size_err_info {
 };
 
 /* Definitions below are used in the DECON */
-#define	DISP_EVENT_LOG_MAX	SZ_1K
+#define	DISP_EVENT_LOG_MAX	SZ_2K
 #define	DISP_EVENT_PRINT_MAX	512
 #define	DISP_EVENT_SIZE_ERR_MAX	16
 typedef enum disp_ss_event_log_level_type {
@@ -666,8 +591,6 @@ struct decon_device {
 	struct decon_win		*windows[MAX_DECON_WIN];
 	struct decon_resources		res;
 	struct v4l2_subdev		*output_sd;
-	/* 2nd DSIM sub-device ptr for dual DSI mode */
-	struct v4l2_subdev		*output_sd1;
 	struct exynos_md		*mdev;
 
 	struct mutex			update_regs_list_lock;
@@ -691,31 +614,8 @@ struct decon_device {
 	spinlock_t			slock;
 	struct decon_vsync		vsync_info;
 	enum decon_state		state;
-
-#if defined(CONFIG_EXYNOS8890_BTS_OPTIMIZATION)
-	u32				total_bw;
-	u32				max_peak_bw;
-	u32				prev_total_bw;
-	u32				prev_max_peak_bw;
-	u32				num_of_win;
-	u32				prev_num_of_win;
-
-	/*
-	 * max current DISP INT channel
-	 *
-	 * ACLK_DISP0_0_400 : G0 + VG0
-	 * ACLK_DISP0_1_400 : G1 + VG1
-	 * ACLK_DISP1_0_400 : G2 + VGR0
-	 * ACLK_DISP1_1_400 : G3 + VGR1
-	 */
-	u64				max_disp_ch;
-	u64				prev_max_disp_ch;
-
-	u32				mic_factor;
-	u32				vclk_factor;
-	struct decon_bts2		*bts2_ops;
-#endif
-
+	enum decon_output_type		out_type;
+	int				out_idx;
 	u32				prev_bw;
 	u32				prev_disp_bw;
 	u32				prev_int_bw;
@@ -731,13 +631,14 @@ struct decon_device {
 	bool				vpp_err_stat[MAX_VPP_SUBDEV];
 	u32				vpp_usage_bitmask;
 	struct decon_lcd		*lcd_info;
+#ifdef CONFIG_FB_WINDOW_UPDATE
 	struct decon_win_rect		update_win;
 	bool				need_update;
+#endif
 	struct decon_underrun_stat	underrun_stat;
 	void __iomem			*cam_status[2];
 	u32				prev_protection_bitmask;
 	u32				cur_protection_bitmask;
-	struct list_head		sbuf_active_list;
 
 	unsigned int			irq;
 	struct dentry			*debug_root;
@@ -771,10 +672,9 @@ struct decon_device {
 	struct work_struct		fifo_irq_work;
 	struct workqueue_struct		*fifo_irq_wq;
 	int				fifo_irq_status;
-	int				re_cnt;
-	int				win_id[2];
-	int				vpp_id[2];
-	bool			vpp_afbc_re;
+	struct vpp_drm_log vpp_log[MAX_VPP_LOG];
+	int log_cnt;
+	int sw_te_wa;
 };
 
 static inline struct decon_device *get_decon_drvdata(u32 id)
@@ -813,30 +713,6 @@ static inline void decon_write_mask(u32 id, u32 reg_id, u32 val, u32 mask)
 
 	val = (val & mask) | (old & ~mask);
 	decon_write(id, reg_id, val);
-}
-
-static inline u32 dsc_read(u32 dsc_id, u32 reg_id)
-{
-	struct decon_device *decon = get_decon_drvdata(0);
-	u32 dsc_offset = dsc_id ? DSC1_OFFSET : DSC0_OFFSET;
-
-	return readl(decon->regs + dsc_offset + reg_id);
-}
-
-static inline void dsc_write(u32 dsc_id, u32 reg_id, u32 val)
-{
-	struct decon_device *decon = get_decon_drvdata(0);
-	u32 dsc_offset = dsc_id ? DSC1_OFFSET : DSC0_OFFSET;
-
-	writel(val, decon->regs + dsc_offset + reg_id);
-}
-
-static inline void dsc_write_mask(u32 dsc_id, u32 reg_id, u32 val, u32 mask)
-{
-	u32 old = dsc_read(dsc_id, reg_id);
-
-	val = (val & mask) | (old & ~mask);
-	dsc_write(dsc_id, reg_id, val);
 }
 
 /* common function API */

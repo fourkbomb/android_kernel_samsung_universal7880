@@ -19,6 +19,17 @@
 #include <linux/usb/composite.h>
 #include <linux/usb/cdc.h>
 
+/* #define CONFIG_USB_NCM_ACCUMULATE_MULTPKT */
+
+#ifdef CONFIG_USB_NCM_ACCUMULATE_MULTPKT
+/* #define DEBUG_USB_NCM */
+#ifdef DEBUG_USB_NCM
+#define DEBUG_NCM(fmt, args...) printk(fmt, ##args)
+#else
+#define DEBUG_NCM(fmt, args...) do {} while (0)
+#endif
+#endif
+
 #include "gadget_chips.h"
 
 struct eth_dev;
@@ -58,7 +69,16 @@ struct gether {
 	unsigned			ul_max_pkts_per_xfer;
 	unsigned			dl_max_pkts_per_xfer;
 	bool				multi_pkt_xfer;
-#endif
+
+#ifdef CONFIG_USB_NCM_ACCUMULATE_MULTPKT
+	void				*header;
+	u16				ndp0_offset;
+	u16				ndp0_blocklengthoffset;
+	u16				ndp0_defaultBlockLen;
+#else
+	struct rndis_packet_msg_type	*header;
+#endif /* CONFIG_USB_NCM_ACCUMULATE_MULTPKT */
+#endif /* CONFIG_USB_RNDIS_MULTIPACKET */
 	struct sk_buff			*(*wrap)(struct gether *port,
 						struct sk_buff *skb);
 	int				(*unwrap)(struct gether *port,

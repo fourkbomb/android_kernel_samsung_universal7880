@@ -34,32 +34,15 @@ static void decon_oneshot_underrun_log(struct decon_device *decon)
 		return;
 
 	if (decon->underrun_stat.underrun_cnt > DECON_UNDERRUN_THRESHOLD) {
-#if defined(CONFIG_EXYNOS8890_BTS_OPTIMIZATION)
-		decon_warn("[underrun]: (cnt %d), (bw %d,%d) (peak_bw %d,%d) (disp %llu,%llu)\n",
-				decon->underrun_stat.underrun_cnt,
-				decon->total_bw, decon->prev_total_bw,
-				decon->max_peak_bw, decon->prev_max_peak_bw,
-				decon->max_disp_ch, decon->prev_max_disp_ch);
-		decon_warn("    total cnt(%d), chmap(0x%08x), win(0x%lx)\n",
-				decon->underrun_stat.total_underrun_cnt,
-				decon->underrun_stat.chmap,
-				decon->underrun_stat.used_windows);
-		decon_warn("    mif(%lu), int(%lu), disp(%lu)\n",
-				cal_dfs_get_rate(dvfs_mif),
-				cal_dfs_get_rate(dvfs_int),
-				cal_dfs_get_rate(dvfs_disp));
-#else
 		decon_warn("[underrun]: (cnt %d), tot_bw %d, int_bw %d, disp_bw %d\n",
 				decon->underrun_stat.underrun_cnt,
 				decon->underrun_stat.prev_bw,
 				decon->underrun_stat.prev_int_bw,
 				decon->underrun_stat.prev_disp_bw);
-		decon_warn("    total cnt(%d), chmap(0x%08x), win(0x%lx), aclk(%ld)\n",
-				decon->underrun_stat.total_underrun_cnt,
+		decon_warn("                  chmap(0x%08x), win(0x%lx), aclk(%ld)\n",
 				decon->underrun_stat.chmap,
 				decon->underrun_stat.used_windows,
 				decon->underrun_stat.aclk / MHZ);
-#endif
 		decon->underrun_stat.underrun_cnt = 0;
 	}
 
@@ -105,7 +88,6 @@ irqreturn_t decon_f_irq_handler(int irq, void *dev_data)
 	}
 
 	if (irq_sts_reg & INTERRUPT_FIFO_LEVEL_INT_EN) {
-		decon->underrun_stat.total_underrun_cnt++;
 		decon->underrun_stat.fifo_level = fifo_level;
 		decon->underrun_stat.prev_bw = decon->prev_bw;
 		decon->underrun_stat.prev_int_bw = decon->prev_int_bw;
@@ -121,6 +103,10 @@ irqreturn_t decon_f_irq_handler(int irq, void *dev_data)
 		decon->frame_done_cnt_cur++;
 		decon_lpd_trig_reset(decon);
 		wake_up_interruptible_all(&decon->wait_frmdone);
+		if (decon->sw_te_wa) {
+			decon->vsync_info.timestamp = timestamp;
+			wake_up_interruptible_all(&decon->vsync_info.wait);
+		}
 	}
 
 	if (irq_sts_reg & INTERRUPT_RESOURCE_CONFLICT_INT_EN)
@@ -188,12 +174,7 @@ void decon_f_set_clocks(struct decon_device *decon)
 	decon_clk_set_rate(dev, decon->res.vclk_leaf,
 			NULL, clks.decon[CLK_ID_VCLK] * MHZ);
 
-	decon->vclk_factor = clk_get_rate(decon->res.vclk_leaf) *
-		DECON_PIX_PER_CLK / MHZ;
-
 	/* ECLK */
-	decon_clk_set_rate(dev, decon->res.eclk,
-			NULL, clks.decon[CLK_ID_ECLK] * MHZ);
 	decon_clk_set_rate(dev, decon->res.eclk_leaf,
 			NULL, clks.decon[CLK_ID_ECLK] * MHZ);
 

@@ -41,11 +41,6 @@ enum {
 	AUTO_CS_MODE = 1,
 };
 
-enum {
-	NON_CHECK_FUSING_BIT = 0,
-	CHECK_FUSING_BIT = 1,
-};
-
 /*
  * Located domain
  */
@@ -87,7 +82,6 @@ struct s3c64xx_spi_info {
 	int dma_mode;
 	int swap_mode;
 	int secure_mode;
-	int check_fusing_bit;
 	int (*cfg_gpio)(void);
 	dma_filter_fn filter;
 	enum spi_domain domain;

@@ -37,6 +37,9 @@
 #include <asm/system_misc.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/sec_debug.h>
+#endif
 
 static int safe_fault_in_progress = 0;
 static const char *fault_name(unsigned int esr);
@@ -115,7 +118,12 @@ static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
 	 * No handler, we'll have to terminate things with extreme prejudice.
 	 */
 	bust_spinlocks(1);
-	pr_alert("Unable to handle kernel %s at virtual address %08lx\n",
+
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+	sec_debug_set_extra_info_fault(addr, regs);
+#endif
+
+	pr_auto(ASL1, "Unable to handle kernel %s at virtual address %08lx\n",
 		 (addr < PAGE_SIZE) ? "NULL pointer dereference" :
 		 "paging request", addr);
 
@@ -387,16 +395,6 @@ static int __kprobes do_translation_fault(unsigned long addr,
 	return 0;
 }
 
-static int __kprobes do_tlb_conflict(unsigned long addr,
-					  unsigned int esr,
-					  struct pt_regs *regs)
-{
-	asm volatile("tlbi vmalle1");
-	asm volatile("dsb nsh");
-
-	return 0;
-}
-
 /*
  * This abort handler always returns "fault".
  */
@@ -459,7 +457,7 @@ static struct fault_info {
 	{ do_bad,		SIGBUS,  0,		"unknown 45"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 46"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 47"			},
-	{ do_tlb_conflict,	SIGBUS,  0,		"TLB conflict"			},
+	{ do_bad,		SIGBUS,  0,		"unknown 48"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 49"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 50"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 51"			},
@@ -495,8 +493,12 @@ asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
 	if (!inf->fn(addr, esr, regs))
 		return;
 
-	pr_alert("Unhandled fault: %s (0x%08x) at 0x%016lx\n",
-		 inf->name, esr, addr);
+	pr_auto(ASL1, "Unhandled fault: %s (0x%08x) at 0x%016lx -- %s\n",
+		 inf->name, esr, addr, esr_get_class_string(esr));
+
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+	sec_debug_set_extra_info_fault(addr, regs);
+#endif
 
 	info.si_signo = inf->sig;
 	info.si_errno = 0;
@@ -513,6 +515,13 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 					   struct pt_regs *regs)
 {
 	struct siginfo info;
+
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+	if (!user_mode(regs)) {
+		sec_debug_set_extra_info_fault(addr, regs);
+		sec_debug_set_extra_info_esr(esr);
+	}
+#endif
 
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;

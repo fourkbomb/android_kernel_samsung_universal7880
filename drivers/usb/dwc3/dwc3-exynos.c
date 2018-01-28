@@ -53,6 +53,8 @@ static const char *dwc3_exynos8890_clk_names[] = {"aclk", "sclk",
 static const char *dwc2_exynos8890_clk_names[] = {"aclk", "sclk",
 				"phyclock", "phy_ref", NULL};
 
+static const char *dwc2_exynos7870_clk_names[] = {"usbdrd20", NULL};
+
 /**
  * Structures for Samsung Exynos DWC3 glue layer
  */
@@ -109,6 +111,11 @@ static struct dwc3_exynos_drvdata dwc2_exynos8890 = {
 	.ip_type	= TYPE_USB2HOST,
 };
 
+
+static struct dwc3_exynos_drvdata dwc2_exynos7870 = {
+	.cpu_type	= TYPE_EXYNOS7870,
+};
+
 static const struct of_device_id exynos_dwc3_match[] = {
 	{
 		.compatible = "samsung,exynos5250-dwusb3",
@@ -122,6 +129,9 @@ static const struct of_device_id exynos_dwc3_match[] = {
 	}, {
 		.compatible = "samsung,exynos8890-dwusb2",
 		.data = &dwc2_exynos8890,
+	}, {
+		.compatible = "samsung,exynos7870-dwusb2",
+		.data = &dwc2_exynos7870,
 	},
 	{},
 };
@@ -620,6 +630,10 @@ static int dwc3_exynos_clk_get(struct dwc3_exynos *exynos)
 		clk_ids = dwc3_exynos5_clk_names;
 		clk_count = ARRAY_SIZE(dwc3_exynos5_clk_names);
 		break;
+	case TYPE_EXYNOS7870:
+               clk_ids = dwc2_exynos7870_clk_names;
+               clk_count = ARRAY_SIZE(dwc2_exynos7870_clk_names);
+               break;
 	default:
 		dev_err(exynos->dev, "couldn't get clock : unknown cpu type\n");
 		return -EINVAL;
@@ -684,10 +698,8 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	if (exynos->drv_data->cpu_type == TYPE_EXYNOS8890) {
-		exynos->idle_ip_index = exynos_get_idle_ip_index(dev_name(dev));
-		exynos_update_ip_idle_status(exynos->idle_ip_index, 0);
-	}
+	exynos->idle_ip_index = exynos_get_idle_ip_index(dev_name(dev));
+	exynos_update_ip_idle_status(exynos->idle_ip_index, 0);
 
 #ifdef CONFIG_PM_DEVFREQ
 	if (of_property_read_u32(node, "usb-pm-qos-int", &exynos->int_min_lock))
@@ -789,14 +801,15 @@ static int dwc3_exynos_remove(struct platform_device *pdev)
 static int dwc3_exynos_runtime_suspend(struct device *dev)
 {
 	struct dwc3_exynos *exynos = dev_get_drvdata(dev);
-
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	dev_info(dev, "%s\n", __func__);
+#else
 	dev_dbg(dev, "%s\n", __func__);
-
+#endif
 	dwc3_exynos_clk_disable(exynos);
 
 	/* inform what USB state is idle to IDLE_IP */
-	if (exynos->drv_data->cpu_type == TYPE_EXYNOS8890)
-		exynos_update_ip_idle_status(exynos->idle_ip_index, 1);
+	exynos_update_ip_idle_status(exynos->idle_ip_index, 1);
 
 #ifdef CONFIG_PM_DEVFREQ
 	if (exynos->int_min_lock)
@@ -809,8 +822,11 @@ static int dwc3_exynos_runtime_resume(struct device *dev)
 {
 	struct dwc3_exynos *exynos = dev_get_drvdata(dev);
 	int ret = 0;
-
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	dev_info(dev, "%s\n", __func__);
+#else
 	dev_dbg(dev, "%s\n", __func__);
+#endif
 
 #ifdef CONFIG_PM_DEVFREQ
 	if (exynos->int_min_lock)
@@ -818,8 +834,7 @@ static int dwc3_exynos_runtime_resume(struct device *dev)
 					exynos->int_min_lock);
 #endif
 	/* inform what USB state is not idle to IDLE_IP */
-	if (exynos->drv_data->cpu_type == TYPE_EXYNOS8890)
-		exynos_update_ip_idle_status(exynos->idle_ip_index, 0);
+	exynos_update_ip_idle_status(exynos->idle_ip_index, 0);
 
 	ret = dwc3_exynos_clk_enable(exynos);
 	if (ret) {
@@ -847,11 +862,6 @@ static int dwc3_exynos_suspend(struct device *dev)
 		regulator_disable(exynos->vdd33);
 	if (exynos->vdd10)
 		regulator_disable(exynos->vdd10);
-
-#ifdef CONFIG_PM_DEVFREQ
-	if (exynos->int_min_lock)
-		pm_qos_update_request(&exynos_usb_int_qos, 0);
-#endif
 
 	return 0;
 }

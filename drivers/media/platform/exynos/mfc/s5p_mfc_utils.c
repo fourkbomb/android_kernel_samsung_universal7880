@@ -10,6 +10,7 @@
  * (at your option) any later version.
  */
 
+#include <linux/smc.h>
 #include "s5p_mfc_utils.h"
 #include "s5p_mfc_mem.h"
 
@@ -117,7 +118,7 @@ int s5p_mfc_stream_buf_prot(struct s5p_mfc_ctx *ctx,
 
 	dev = ctx->dev;
 	if (!dev) {
-		mfc_err_ctx("no mfc device to run\n");
+		mfc_err("no mfc device to run\n");
 		return ret;
 	}
 
@@ -174,7 +175,7 @@ int s5p_mfc_raw_buf_prot(struct s5p_mfc_ctx *ctx,
 
 	dev = ctx->dev;
 	if (!dev) {
-		mfc_err_ctx("no mfc device to run\n");
+		mfc_err("no mfc device to run\n");
 		return -EINVAL;
 	}
 

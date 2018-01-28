@@ -4463,7 +4463,8 @@ static int synaptics_rmi4_start_device(struct synaptics_rmi4_data *rmi4_data)
 	if (pdata->enable_sync)
 		pdata->enable_sync(true);
 
-	msleep(SYNAPTICS_HW_RESET_TIME);
+	/* When resume, it seems to be more margin */
+	msleep(SYNAPTICS_POWER_MARGIN_TIME * 2);
 
 	retval = synaptics_rmi4_reinit_device(rmi4_data);
 	if (retval < 0) {

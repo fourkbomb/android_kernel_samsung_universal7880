@@ -751,6 +751,16 @@ void ext4_mb_generate_buddy(struct super_block *sb,
 	grp->bb_fragments = fragments;
 
 	if (free != grp->bb_free) {
+		/* for more specific debugging, sangwoo2.lee */
+		struct ext4_group_desc *desc;
+		ext4_fsblk_t bitmap_blk;
+
+		desc = ext4_get_group_desc(sb, group, NULL);
+		bitmap_blk = ext4_block_bitmap(sb, desc);
+
+		print_block_data(sb, bitmap_blk, bitmap, 0, EXT4_BLOCK_SIZE(sb));
+		/* for more specific debugging */
+
 		ext4_grp_locked_error(sb, group, 0, 0,
 				      "block bitmap and bg descriptor "
 				      "inconsistent: %u vs %u free clusters",
@@ -1438,10 +1448,19 @@ static void mb_free_blocks(struct inode *inode, struct ext4_buddy *e4b,
 
 	if (unlikely(block != -1)) {
 		struct ext4_sb_info *sbi = EXT4_SB(sb);
-		ext4_fsblk_t blocknr;
+		/* for debugging, sangwoo2.lee */
+		struct ext4_group_desc *desc;
+		ext4_fsblk_t blocknr, bitmap_blk;
+
+		desc = ext4_get_group_desc(sb, e4b->bd_group, NULL);
+		bitmap_blk = ext4_block_bitmap(sb, desc);
 
 		blocknr = ext4_group_first_block_no(sb, e4b->bd_group);
 		blocknr += EXT4_C2B(EXT4_SB(sb), block);
+
+		print_block_data(sb, bitmap_blk, e4b->bd_bitmap, 0
+			, EXT4_BLOCK_SIZE(sb));
+		/* for debugging */
 		ext4_grp_locked_error(sb, e4b->bd_group,
 				      inode ? inode->i_ino : 0,
 				      blocknr,
@@ -4409,6 +4428,9 @@ ext4_fsblk_t ext4_mb_new_blocks(handle_t *handle,
 	/* Allow to use superuser reservation for quota file */
 	if (IS_NOQUOTA(ar->inode))
 		ar->flags |= EXT4_MB_USE_ROOT_BLOCKS;
+
+	if (ext4_test_inode_flag(ar->inode, EXT4_INODE_CORE_FILE))
+		ar->flags |= EXT4_MB_USE_EXTRA_ROOT_BLOCKS;
 
 	if ((ar->flags & EXT4_MB_DELALLOC_RESERVED) == 0) {
 		/* Without delayed allocation we need to verify

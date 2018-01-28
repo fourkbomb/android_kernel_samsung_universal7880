@@ -68,6 +68,16 @@ enum exynos_devfreq_lv_index {
 	DEV_LV_END,
 };
 
+enum
+{
+	APL_EXYNOS_FREQ = 0,
+	ATL_EXYNOS_FREQ,
+	INT_EXYNOS_FREQ,
+	MIF_EXYNOS_FREQ,
+	ISP_EXYNOS_FREQ,
+	DISP_EXYNOS_FREQ,
+};
+
 struct exynos_devfreq_opp_table {
 	u32 idx;
 	u32 freq;

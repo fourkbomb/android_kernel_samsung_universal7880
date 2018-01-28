@@ -68,6 +68,7 @@ static irqreturn_t exynos_smfc_irq_handler(int irq, void *priv)
 			clk_disable(smfc->clk_gate2);
 	}
 
+	iovmm_deactivate(smfc->dev);
 	pm_runtime_put(smfc->dev);
 
 	/* ctx is NULL if streamoff is called before (de)compression finishes */
@@ -142,6 +143,7 @@ static void smfc_timedout_handler(unsigned long arg)
 			clk_disable(smfc->clk_gate2);
 	}
 
+	iovmm_deactivate(smfc->dev);
 	pm_runtime_put(smfc->dev);
 
 	ctx = v4l2_m2m_get_curr_priv(smfc->m2mdev);
@@ -518,6 +520,12 @@ static void smfc_m2m_device_run(void *priv)
 		goto err_pm;
 	}
 
+	ret = iovmm_activate(ctx->smfc->dev);
+	if (ret < 0) {
+		pr_err("Failed to activate iommu\n");
+		goto err_clk;
+	}
+
 	if (!IS_ERR(ctx->smfc->clk_gate)) {
 		ret = clk_enable(ctx->smfc->clk_gate);
 		if (!ret && !IS_ERR(ctx->smfc->clk_gate2)) {
@@ -859,10 +867,6 @@ static int exynos_smfc_probe(struct platform_device *pdev)
 		return ret;
 
 	iovmm_set_fault_handler(&pdev->dev, smfc_iommu_fault_handler, smfc);
-
-	ret = iovmm_activate(&pdev->dev);
-	if (ret < 0)
-		return ret;
 
 	smfc->vb2_alloc_ctx = vb2_ion_create_context(&pdev->dev, SZ_4K,
 					VB2ION_CTX_VMCONTIG | VB2ION_CTX_IOMMU);

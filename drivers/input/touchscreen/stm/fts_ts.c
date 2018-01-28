@@ -52,6 +52,7 @@
 #include <linux/firmware.h>
 #include <linux/regulator/consumer.h>
 #include <linux/of_gpio.h>
+#include <linux/sec_sysfs.h>
 
 #ifdef CONFIG_TRUSTONIC_TRUSTED_UI
 #include <linux/trustedui.h>
@@ -1591,12 +1592,17 @@ static int fts_power_ctrl(void *data, bool on)
 		retval = regulator_enable(regulator_dvdd);
 		if (retval) {
 			tsp_debug_err(true, dev, "%s: Failed to enable vdd: %d\n", __func__, retval);
+			regulator_disable(regulator_avdd);
 			goto out;
 		}
 
 		retval = pinctrl_select_state(pdata->pinctrl, pdata->pins_default);
-		if (retval < 0)
+		if (retval < 0) {
 			tsp_debug_err(true, dev, "%s: Failed to configure tsp_attn pin\n", __func__);
+			regulator_disable(regulator_dvdd);
+			regulator_disable(regulator_avdd);
+			goto out;
+		}
 
 		fts_delay(5);
 	} else {
@@ -2116,7 +2122,8 @@ err_fts_init:
 	mutex_destroy(&info->device_mutex);
 	mutex_destroy(&info->i2c_mutex);
 err_input_allocate_device:
-	info->board->power(info, false);
+	if (info->board->power)
+		info->board->power(info, false);
 	kfree(info);
 err_get_drv_data:
 err_setup_drv_data:

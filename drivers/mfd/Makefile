@@ -39,20 +39,14 @@ obj-$(CONFIG_MFD_ARIZONA)	+= arizona-core.o
 obj-$(CONFIG_MFD_ARIZONA)	+= arizona-irq.o
 obj-$(CONFIG_MFD_ARIZONA_I2C)	+= arizona-i2c.o
 obj-$(CONFIG_MFD_ARIZONA_SPI)	+= arizona-spi.o
-ifeq ($(CONFIG_MFD_WM5102),y)
+ifneq ($(CONFIG_MFD_WM5102),n)
 obj-$(CONFIG_MFD_ARIZONA)	+= wm5102-tables.o
 endif
-ifeq ($(CONFIG_MFD_WM5110),y)
+ifneq ($(CONFIG_MFD_WM5110),n)
 obj-$(CONFIG_MFD_ARIZONA)	+= wm5110-tables.o
 endif
-ifeq ($(CONFIG_MFD_WM8997),y)
+ifneq ($(CONFIG_MFD_WM8997),n)
 obj-$(CONFIG_MFD_ARIZONA)	+= wm8997-tables.o
-endif
-ifeq ($(CONFIG_MFD_CLEARWATER),y)
-obj-$(CONFIG_MFD_ARIZONA)       += clearwater-tables.o
-endif
-ifeq ($(CONFIG_MFD_MOON), y)
-obj-$(CONFIG_MFD_ARIZONA)	+= moon-tables.o
 endif
 obj-$(CONFIG_MFD_WM8400)	+= wm8400-core.o
 wm831x-objs			:= wm831x-core.o wm831x-irq.o wm831x-otp.o
@@ -123,6 +117,7 @@ obj-$(CONFIG_MFD_DA9063)	+= da9063.o
 obj-$(CONFIG_MFD_MAX14577)	+= max14577.o
 obj-$(CONFIG_MFD_MAX77686)	+= max77686.o
 obj-$(CONFIG_MFD_MAX77693)	+= max77693.o
+obj-$(CONFIG_MFD_MAX77833)	+= max77833.o max77833-irq.o
 obj-$(CONFIG_MFD_MAX8907)	+= max8907.o
 max8925-objs			:= max8925-core.o max8925-i2c.o
 obj-$(CONFIG_MFD_MAX8925)	+= max8925.o
@@ -172,6 +167,8 @@ obj-$(CONFIG_MFD_RN5T618)	+= rn5t618.o
 obj-$(CONFIG_MFD_SEC_CORE)	+= sec-core.o sec-irq.o
 obj-$(CONFIG_MFD_S2MPB02)	+= s2mpb02-core.o s2mpb02-irq.o
 obj-$(CONFIG_MFD_S2MU003)	+= s2mu003_core.o s2mu003_irq.o
+obj-$(CONFIG_MFD_S2MU004)	+= s2mu004_core.o s2mu004_irq.o
+obj-$(CONFIG_MFD_S2MU005)	+= s2mu005_core.o s2mu005_irq.o
 obj-$(CONFIG_MFD_SYSCON)	+= syscon.o
 obj-$(CONFIG_MFD_LM3533)	+= lm3533-core.o lm3533-ctrlbank.o
 obj-$(CONFIG_MFD_VEXPRESS_SYSREG)	+= vexpress-sysreg.o

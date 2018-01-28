@@ -211,8 +211,8 @@ static void sync_fence_delayed_free(struct kref *kref) {
 	 * pend the worker for a jiffie to prevent superfluous invokation of
 	 * workers.
 	 */
-	if (llist_add(&fence->rmnode, &delayed_free_list))
-		schedule_delayed_work(&sync_fence_delayed_work, 1);
+	llist_add(&fence->rmnode, &delayed_free_list);
+	schedule_delayed_work(&sync_fence_delayed_work, 1);
 }
 
 static void fence_check_cb_func(struct fence *f, struct fence_cb *cb)
@@ -438,8 +438,13 @@ int sync_fence_wait(struct sync_fence *fence, long timeout)
 		return ret;
 	} else if (ret == 0) {
 		if (timeout) {
+#if defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
+			pr_info("fence timeout on [%pK] after %dms\n", fence,
+				jiffies_to_msecs(timeout));
+#else
 			pr_info("fence timeout on [%p] after %dms\n", fence,
 				jiffies_to_msecs(timeout));
+#endif
 			sync_dump();
 		}
 		return -ETIME;
@@ -447,7 +452,11 @@ int sync_fence_wait(struct sync_fence *fence, long timeout)
 
 	ret = atomic_read(&fence->status);
 	if (ret) {
+#if defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
+		pr_info("fence error %ld on [%pK]\n", ret, fence);
+#else
 		pr_info("fence error %ld on [%p]\n", ret, fence);
+#endif
 		sync_dump();
 	}
 	return ret;

@@ -205,6 +205,26 @@ uart_dbg_store(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR(uart_dbg, 0640, uart_dbg_show, uart_dbg_store);
 
+static ssize_t
+uart_error_cnt_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	int ret=0;
+	struct s3c24xx_uart_port *ourport;
+	sprintf(buf, "000 000 000 000\n");//init buf : overrun parity frame break count
+
+	list_for_each_entry(ourport, &drvdata_list, node){ 
+	struct uart_port *port = &ourport->port;
+	
+	if (&ourport->pdev->dev != dev)
+		continue;
+
+	ret = sprintf(buf, "%03x %03x %03x %03x\n", port->icount.overrun, 0, port->icount.frame, port->icount.brk);
+
+	}
+	return ret;
+}
+
+static DEVICE_ATTR(error_cnt, 0664, uart_error_cnt_show, NULL);
 static void s3c24xx_serial_resetport(struct uart_port *port,
 				   struct s3c2410_uartcfg *cfg);
 static void s3c24xx_serial_pm(struct uart_port *port, unsigned int level,
@@ -438,18 +458,22 @@ s3c24xx_serial_rx_chars(int irq, void *dev_id)
 			    ch, uerstat);
 
 			/* check for break */
-			if (uerstat & S3C2410_UERSTAT_BREAK) {
+			if (uerstat & S3C2410_UERSTAT_BREAK) {				
+				pr_err("(s3c24xx_serial_rx_chars)uerstat & S3C2410_UERSTAT_BREAK!\n");
 				dbg("break!\n");
 				port->icount.brk++;
 				if (uart_handle_break(port))
 					goto ignore_char;
 			}
 
-			if (uerstat & S3C2410_UERSTAT_FRAME)
+			if (uerstat & S3C2410_UERSTAT_FRAME){
+				pr_err("(s3c24xx_serial_rx_chars)uerstat & S3C2410_UERSTAT_FRAME!\n");
 				port->icount.frame++;
-			if (uerstat & S3C2410_UERSTAT_OVERRUN)
+			}
+			if (uerstat & S3C2410_UERSTAT_OVERRUN){
+				pr_err("(s3c24xx_serial_rx_chars)uerstat & S3C2410_UERSTAT_OVERRUN!\n");
 				port->icount.overrun++;
-
+			}
 			uerstat &= port->read_status_mask;
 
 			if (uerstat & S3C2410_UERSTAT_BREAK)
@@ -1515,7 +1539,7 @@ void s3c24xx_serial_fifo_wait(void)
 	unsigned long wait_time;
 
 	list_for_each_entry(ourport, &drvdata_list, node) {
-		if (!uart_console(&ourport->port))
+		if (ourport->port.line != CONFIG_S3C_LOWLEVEL_UART_PORT)
 			continue;
 
 		wait_time = jiffies + HZ / 4;
@@ -1544,9 +1568,8 @@ static int s3c24xx_serial_notifier(struct notifier_block *self,
 		break;
 
 	case SICD_ENTER:
-	case SICD_AUD_ENTER:
 		list_for_each_entry(ourport, &drvdata_list, node) {
-			if (uart_console(&ourport->port))
+			if (ourport->port.line == CONFIG_S3C_LOWLEVEL_UART_PORT)
 				continue;
 
 			port = &ourport->port;
@@ -1566,9 +1589,8 @@ static int s3c24xx_serial_notifier(struct notifier_block *self,
 		break;
 
 	case SICD_EXIT:
-	case SICD_AUD_EXIT:
 		list_for_each_entry(ourport, &drvdata_list, node) {
-			if (uart_console(&ourport->port))
+			if (ourport->port.line == CONFIG_S3C_LOWLEVEL_UART_PORT)
 				continue;
 
 			port = &ourport->port;
@@ -1665,8 +1687,8 @@ static int s3c24xx_serial_probe(struct platform_device *pdev)
 						&ourport->uart_irq_affinity))
 		ourport->uart_irq_affinity = 0;
 
-	if (of_property_read_u32(pdev->dev.of_node, "qos_timeout",
-					(u32 *)&ourport->qos_timeout))
+	if (of_property_read_u64(pdev->dev.of_node, "qos_timeout",
+					(u64 *)&ourport->qos_timeout))
 		ourport->qos_timeout = 0;
 
 	if ((ourport->mif_qos_val || ourport->cpu_qos_val)
@@ -1746,6 +1768,10 @@ static int s3c24xx_serial_probe(struct platform_device *pdev)
 	if (ret < 0)
 		dev_err(&pdev->dev, "failed to create sysfs file.\n");
 
+	ret = device_create_file(&pdev->dev, &dev_attr_error_cnt);
+	if (ret < 0)
+		dev_err(&pdev->dev, "failed to create sysfs file.\n");
+
 	ourport->dbg_mode = 0;
 
 	return 0;
@@ -1766,6 +1792,9 @@ static int s3c24xx_serial_remove(struct platform_device *dev)
 #endif
 
 	if (port) {
+
+        device_remove_file(&dev->dev, &dev_attr_error_cnt);
+
 #ifdef CONFIG_SAMSUNG_CLOCK
 		device_remove_file(&dev->dev, &dev_attr_clock_source);
 #endif

@@ -58,3 +58,18 @@ obj-$(CONFIG_ECHO)		+= echo/
 obj-$(CONFIG_VEXPRESS_SYSCFG)	+= vexpress-syscfg.o
 obj-$(CONFIG_CXL_BASE)		+= cxl/
 obj-$(CONFIG_UID_CPUTIME) += uid_cputime.o
+obj-$(CONFIG_MCU_IPC)		+= mcu_ipc/
+obj-$(CONFIG_UART_SEL)	+= uart_sel/
+obj-$(CONFIG_SEC_SIPC_MODEM_IF)	+= modem_v1/
+obj-$(CONFIG_SEC_MODEM_IF) += modem_if/
+obj-$(CONFIG_GNSS_SHMEM_IF)	+= gnss_if/
+obj-$(CONFIG_EXYNOS_POWEROFF)	+= exynos_poweroff.o
+obj-$(CONFIG_SD8XXX_RFKILL)	+= sd8x_rfkill.o
+# Tima
+obj-$(CONFIG_TIMA_LOG)		+= tima_debug_log.o
+
+# for DMVerity
+obj-$(CONFIG_DM_VERITY)		+= dmverity_query.o
+
+# Secure OS Mobicore Interface
+obj-$(CONFIG_TRUSTONIC_TEE)	+= tzic64.o

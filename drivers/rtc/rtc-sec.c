@@ -30,8 +30,11 @@
 #include <linux/mfd/samsung/s2mps15.h>
 #include <linux/mfd/samsung/s2mps16.h>
 #include <linux/mfd/samsung/s2mpu03.h>
+#include <linux/mfd/samsung/s2mpu05.h>
 #include <soc/samsung/cpufreq.h>
-
+#if defined(CONFIG_S2MU005_ACOK_NOTIFY)
+#include <linux/mfd/samsung/s2mu005.h>
+#endif
 #ifdef CONFIG_EXYNOS_MBOX
 #include <linux/apm-exynos.h>
 #endif
@@ -41,6 +44,11 @@ struct s2m_rtc_info {
 	struct rtc_device	*rtc_dev;
 	struct mutex		lock;
 	struct work_struct	irq_work;
+#if defined(CONFIG_S2MU005_ACOK_NOTIFY)
+	struct work_struct	acok_work;
+	int			acokf_irq;
+	int			acokr_irq;
+#endif
 	int			irq;
 	int			smpl_irq;
 	bool			use_irq;
@@ -143,7 +151,7 @@ static int s2m_rtc_update(struct s2m_rtc_info *info,
 	case S2M_RTC_WRITE_ALARM:
 		if (info->iodev->device_type == S2MPS15X && SEC_PMIC_REV(info->iodev))
 			data = info->audr_mask;
-		else if (info->iodev->device_type == S2MPU03X || info->iodev->device_type == S2MPS16X)
+		else if (info->iodev->device_type >= S2MPU03X)
 			data = info->audr_mask;
 		else if (info->udr_updated)
 			data = info->audr_mask | info->wudr_mask;
@@ -344,6 +352,9 @@ static int s2m_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	case S2MPS16X:
 		reg = S2MPS16_REG_ST2;
 		break;
+	case S2MPU05X:
+		reg = S2MPU05_REG_ST2;
+		break;
 	default:
 		/* If this happens the core funtion has a problem */
 		BUG();
@@ -465,6 +476,48 @@ static irqreturn_t s2m_rtc_alarm_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+#if defined(CONFIG_S2MU005_ACOK_NOTIFY)
+static irqreturn_t s2m_acokf_irq(int irq, void *data)
+{
+	struct s2m_rtc_info *info = data;
+
+	if (!info->rtc_dev)
+		return IRQ_HANDLED;
+
+	dev_info(info->dev, "%s:irq(%d)\n", __func__, irq);
+
+	schedule_work(&info->acok_work);
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t s2m_acokr_irq(int irq, void *data)
+{
+	struct s2m_rtc_info *info = data;
+
+	if (!info->rtc_dev)
+		return IRQ_HANDLED;
+
+	dev_info(info->dev, "%s:irq(%d)\n", __func__, irq);
+
+	schedule_work(&info->acok_work);
+
+	return IRQ_HANDLED;
+}
+
+static void s2m_acok_work(struct work_struct *work)
+{
+#if defined(CONFIG_S2MU005_ACOK_NOTIFY)
+	s2m_acok_notify_call_chain();
+#endif
+	//switch(info->iodev->device_type) {
+	/* smpl_warn interrupt is active high */
+	//case S2MPU04X:
+	//	s2m_acok_notify_call_chain();
+	//	break;
+	//}
+}
+#endif
 static irqreturn_t s2m_smpl_warn_irq(int irq, void *data)
 {
 	struct s2m_rtc_info *info = data;
@@ -523,7 +576,7 @@ static void s2m_adc_read_data(struct s2m_rtc_info *info)
 static unsigned int get_coeff(struct device *dev, u8 adc_reg_num)
 {
 	struct s2m_rtc_info *info = dev_get_drvdata(dev);
-	unsigned int coeff, temp;
+	unsigned int coeff = 0, temp;
 	u8 is_evt2;
 
 	switch(info->iodev->device_type) {
@@ -550,10 +603,10 @@ static unsigned int get_coeff(struct device *dev, u8 adc_reg_num)
 	case S2MPS16X:
 		/* if the regulator is LDO */
 		if (adc_reg_num >= S2MPS16_LDO_START && adc_reg_num <= S2MPS16_LDO_END)
-			coeff = s2mps16_ldo_coeffs[adc_reg_num - 41];
+			coeff = s2mps16_ldo_coeffs[adc_reg_num - 0x41];
 		/* if the regulator is BUCK */
 		else if (adc_reg_num >= S2MPS16_BUCK_START && adc_reg_num <= S2MPS16_BUCK_END)
-			coeff = s2mps16_buck_coeffs[adc_reg_num - 1];
+			coeff = s2mps16_buck_coeffs[adc_reg_num - 0x1];
 		else {
 			dev_err(info->dev, "%s: invalid adc regulator number(%d)\n", __func__, adc_reg_num);
 			coeff = 0;
@@ -697,7 +750,7 @@ static ssize_t adc_reg_7_show(struct device *dev, struct device_attribute *attr,
 static ssize_t adc_ctrl2_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct s2m_rtc_info *info = dev_get_drvdata(dev);
-	u8 adc_ctrl2;
+	u8 adc_ctrl2 = 0;
 	switch (info->iodev->device_type) {
 	case S2MPS15X:
 		sec_reg_read(info->iodev, S2MPS15_REG_ADC_CTRL2, &adc_ctrl2);
@@ -713,7 +766,7 @@ static ssize_t adc_ctrl2_show(struct device *dev, struct device_attribute *attr,
 
 static u8 buf_to_adc_reg(const char *buf, int device_type)
 {
-	u8 adc_reg_num;
+	u8 adc_reg_num = 0;
 
 	if (kstrtou8(buf, 16, &adc_reg_num))
 		return 0;
@@ -722,14 +775,15 @@ static u8 buf_to_adc_reg(const char *buf, int device_type)
 	case S2MPS15X:
 		if ((adc_reg_num >= S2MPS15_BUCK_START && adc_reg_num <= S2MPS15_BUCK_END) ||
 			(adc_reg_num >= S2MPS15_LDO_START && adc_reg_num <= S2MPS15_LDO_END))
-		return adc_reg_num;
+		break;
 	case S2MPS16X:
 		if ((adc_reg_num >= S2MPS16_BUCK_START && adc_reg_num <= S2MPS16_BUCK_END) ||
 			(adc_reg_num >= S2MPS16_LDO_START && adc_reg_num <= S2MPS16_LDO_END))
-		return adc_reg_num;
+		break;
 	default:
-		return 0;
+		break;
 	}
+	return adc_reg_num;
 }
 
 static void adc_reg_update(struct device *dev)
@@ -776,6 +830,7 @@ static void adc_ctrl1_update(struct device *dev)
 
 		/* ADC Continuous ON */
 		sec_reg_write(info->iodev, S2MPS15_REG_ADC_CTRL2, S2MPS15_ADCEN_MASK);
+		break;
 	case S2MPS16X:
 		/* ADC temporarily off */
 		sec_reg_write(info->iodev, S2MPS16_REG_ADC_CTRL2, 0);
@@ -785,6 +840,9 @@ static void adc_ctrl1_update(struct device *dev)
 
 		/* ADC Continuous ON */
 		sec_reg_write(info->iodev, S2MPS16_REG_ADC_CTRL2, S2MPS16_ADCEN_MASK);
+		break;
+	default:
+		break;
 	}
 }
 
@@ -1206,6 +1264,10 @@ static bool s2m_is_jigonb_low(struct s2m_rtc_info *info)
 		reg = S2MPS16_REG_ST1;
 		mask = BIT(1);
 		break;
+	case S2MPU05X:
+		reg = S2MPU05_REG_ST1;
+		mask = BIT(1);
+		break;
 	default:
 		/* If this happens the core funtion has a problem */
 		BUG();
@@ -1219,6 +1281,57 @@ static bool s2m_is_jigonb_low(struct s2m_rtc_info *info)
 	}
 
 	return !(val & mask);
+}
+
+
+static void s2m_rtc_optimize_osc(struct s2m_rtc_info *info,
+						struct sec_platform_data *pdata)
+{
+	int ret = 0;
+
+	/* edit option for OSC_BIAS_UP */
+	if (pdata->osc_bias_up >= 0) {
+		ret = sec_rtc_update(info->iodev, S2M_CAP_SEL,
+			pdata->osc_bias_up << OSC_BIAS_UP_SHIFT,
+			OSC_BIAS_UP_MASK);
+		if (ret < 0) {
+			dev_err(info->dev, "%s: fail to write OSC_BIAS_UP(%d)\n",
+				__func__, pdata->osc_bias_up);
+			return;
+		}
+	}
+
+	/* edit option for CAP_SEL */
+	if (pdata->cap_sel >= 0) {
+		ret = sec_rtc_update(info->iodev, S2M_CAP_SEL,
+			pdata->cap_sel << CAP_SEL_SHIFT, CAP_SEL_MASK);
+		if (ret < 0) {
+			dev_err(info->dev, "%s: fail to write CAP_SEL(%d)\n",
+			__func__, pdata->cap_sel);
+			return;
+		}
+	}
+
+	/* edit option for OSC_CTRL */
+	if (pdata->osc_xin >= 0) {
+		ret = sec_rtc_update(info->iodev, S2M_RTC_OSC_CTRL,
+			pdata->osc_xin << OSC_XIN_SHIFT, OSC_XIN_MASK);
+		if (ret < 0) {
+			dev_err(info->dev, "%s: fail to write OSC_CTRL(%d)\n",
+			__func__,  pdata->osc_xin);
+			return;
+		}
+	}
+
+	if (pdata->osc_xout >= 0) {
+		ret = sec_rtc_update(info->iodev, S2M_RTC_OSC_CTRL,
+			pdata->osc_xout << OSC_XOUT_SHIFT, OSC_XOUT_MASK);
+		if (ret < 0) {
+			dev_err(info->dev, "%s: fail to write OSC_CTRL(%d)\n",
+			__func__, pdata->osc_xout);
+			return;
+		}
+	}
 }
 
 static void s2m_rtc_enable_wtsr_smpl(struct s2m_rtc_info *info,
@@ -1358,18 +1471,29 @@ static int s2m_rtc_probe(struct platform_device *pdev)
 	mutex_init(&info->lock);
 	info->dev = &pdev->dev;
 	info->iodev = iodev;
-	info->alarm_check = false;
+	info->alarm_check = true;
 	info->udr_updated = false;
 	info->use_alarm_workaround = false;
-	info->wudr_mask = RTC_WUDR_MASK;
-	info->audr_mask = RTC_AUDR_MASK;
 
-	switch (iodev->device_type) {
-	case S2MPS16X:
-		info->irq = irq_base + S2MPS16_IRQ_RTCA0;
-		info->alarm_check = true;
+	if (iodev->device_type >= S2MPU03X) {
 		info->wudr_mask = RTC_WUDR_MASK_REV;
 		info->audr_mask = RTC_AUDR_MASK_REV;
+	} else {
+		info->wudr_mask = RTC_WUDR_MASK;
+		info->audr_mask = RTC_AUDR_MASK;
+	}
+
+	switch (iodev->device_type) {
+	case S2MPU05X:
+		info->irq = irq_base + S2MPU05_IRQ_RTCA0;
+#if defined(CONFIG_S2MU005_ACOK_NOTIFY)
+		info->acokf_irq = irq_base + S2MPU05_IRQ_ACOKF;
+		info->acokr_irq = irq_base + S2MPU05_IRQ_ACOKR;
+		INIT_WORK(&info->acok_work, s2m_acok_work);
+#endif
+		break;
+	case S2MPS16X:
+		info->irq = irq_base + S2MPS16_IRQ_RTCA0;
 		if (pdata->smpl_warn_en) {
 			if (!gpio_is_valid(pdata->smpl_warn)) {
 				dev_err(&pdev->dev, "smpl_warn GPIO NOT VALID\n");
@@ -1392,18 +1516,12 @@ static int s2m_rtc_probe(struct platform_device *pdev)
 		break;
 	case S2MPU03X:
 		info->irq = irq_base + S2MPU03_IRQ_RTCA0;
-		info->alarm_check = true;
-		info->wudr_mask = RTC_WUDR_MASK_REV;
-		info->audr_mask = RTC_AUDR_MASK_REV;
 		break;
 	case S2MPS15X:
 		info->irq = irq_base + S2MPS15_IRQ_RTCA0;
-		info->alarm_check = true;
 		if (SEC_PMIC_REV(iodev)) {
 			info->wudr_mask = RTC_WUDR_MASK_REV;
 			info->audr_mask = RTC_AUDR_MASK_REV;
-		}
-		if (SEC_PMIC_REV(iodev)) {
 			if (pdata->smpl_warn_en) {
 				if (!gpio_is_valid(pdata->smpl_warn)) {
 					dev_err(&pdev->dev, "smpl_warn GPIO NOT VALID\n");
@@ -1462,14 +1580,15 @@ static int s2m_rtc_probe(struct platform_device *pdev)
 					__func__, __LINE__, ret);
 				goto err_smpl_warn;
 			}
-			info->alarm_check = true;
 			info->udr_updated = true;
 		} else {
 			info->use_alarm_workaround = true;
+			info->alarm_check = false;
 		}
 		break;
 	case S2MPS11X:
 		info->irq = irq_base + S2MPS11_IRQ_RTCA0;
+		info->alarm_check = false;
 		break;
 	default:
 		/* If this happens the core funtion has a problem */
@@ -1487,6 +1606,8 @@ static int s2m_rtc_probe(struct platform_device *pdev)
 	if (pdata->wtsr_smpl)
 		s2m_rtc_enable_wtsr_smpl(info, pdata);
 
+	s2m_rtc_optimize_osc(info, pdata);
+
 	device_init_wakeup(&pdev->dev, true);
 	rtc_ws = wakeup_source_register("rtc-sec");
 
@@ -1497,6 +1618,22 @@ static int s2m_rtc_probe(struct platform_device *pdev)
 			info->irq, ret);
 		goto err_rtc_irq;
 	}
+#if defined(CONFIG_S2MU005_ACOK_NOTIFY)
+	ret = devm_request_threaded_irq(&pdev->dev, info->acokf_irq, NULL,
+			s2m_acokf_irq, 0, "rtc-acokf", info);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to request acokf IRQ: %d: %d\n",
+			info->acokf_irq, ret);
+		goto err_rtc_init_reg;
+	}
+	ret = devm_request_threaded_irq(&pdev->dev, info->acokr_irq, NULL,
+			s2m_acokr_irq, 0, "rtc-acokr", info);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to request acokr IRQ: %d: %d\n",
+			info->acokr_irq, ret);
+		goto err_rtc_init_reg;
+	}
+#endif
 	disable_irq(info->irq);
 	disable_irq(info->irq);
 	info->use_irq = true;

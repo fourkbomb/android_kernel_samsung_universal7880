@@ -659,10 +659,6 @@ static int vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
 	mfc_debug_enter();
 	mfc_debug(2, "f->type = %d ctx->state = %d\n", f->type, ctx->state);
 
-	if (ctx->state == MFCINST_VPS_PARSED_ONLY) {
-		mfc_err("MFCINST_VPS_PARSED_ONLY !!!\n");
-		return -EAGAIN;
-	}
 	if (ctx->state == MFCINST_GOT_INST ||
 	    ctx->state == MFCINST_RES_CHANGE_FLUSH ||
 	    ctx->state == MFCINST_RES_CHANGE_END) {
@@ -670,13 +666,8 @@ static int vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
 		 * so wait until it is finished */
 		if (s5p_mfc_wait_for_done_ctx(ctx,
 				S5P_FIMV_R2H_CMD_SEQ_DONE_RET)) {
-			if (ctx->state == MFCINST_VPS_PARSED_ONLY) {
-				mfc_err("MFCINST_VPS_PARSED_ONLY !!!\n");
+				mfc_err("header parsing failed\n");
 				return -EAGAIN;
-			} else {
-				s5p_mfc_cleanup_timeout_and_try_run(ctx);
-				return -EIO;
-			}
 		}
 	}
 
@@ -685,15 +676,11 @@ static int vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
 		/* This is run on CAPTURE (deocde output) */
 
 		/* only 2 plane is supported for HEVC 10bit */
-		if (dec->is_10bit) {
-			if (ctx->dst_fmt->mem_planes == 1) {
-				ctx->dst_fmt = (struct s5p_mfc_fmt *)&formats[7];
-			} else if (ctx->dst_fmt->mem_planes == 3) {
-				ctx->dst_fmt = (struct s5p_mfc_fmt *)&formats[5];
-				ctx->raw_buf.num_planes = 2;
-			}
-			mfc_info_ctx("HEVC 10bit: format is changed to %s\n",
-							ctx->dst_fmt->name);
+		if (ctx->raw_buf.num_planes == 3 && dec->is_10bit) {
+			ctx->dst_fmt = (struct s5p_mfc_fmt *)&formats[5];
+			ctx->raw_buf.num_planes = 2;
+			mfc_info_ctx("HEVC 10bit : format is changed to 0x%x\n",
+							ctx->dst_fmt->fourcc);
 		}
 
 		raw = &ctx->raw_buf;
@@ -717,15 +704,13 @@ static int vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
 		pix_mp->pixelformat = ctx->dst_fmt->fourcc;
 		for (i = 0; i < ctx->dst_fmt->mem_planes; i++) {
 			pix_mp->plane_fmt[i].bytesperline = raw->stride[i];
-			if (ctx->dst_fmt->mem_planes == 1) {
+			if (dec->is_10bit)
+				pix_mp->plane_fmt[i].sizeimage = raw->plane_size[i]
+							+ raw->plane_size_2bits[i];
+			else if (ctx->dst_fmt->mem_planes == 1)
 				pix_mp->plane_fmt[i].sizeimage = raw->total_plane_size;
-			} else {
-				if (dec->is_10bit)
-					pix_mp->plane_fmt[i].sizeimage = raw->plane_size[i]
-						+ raw->plane_size_2bits[i];
-				else
-					pix_mp->plane_fmt[i].sizeimage = raw->plane_size[i];
-			}
+			else
+				pix_mp->plane_fmt[i].sizeimage = raw->plane_size[i];
 		}
 	}
 
@@ -814,8 +799,7 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		}
 		if (!IS_MFCv10X(dev)) {
 			if (fmt->fourcc == V4L2_PIX_FMT_NV12N ||
-				fmt->fourcc == V4L2_PIX_FMT_YUV420N ||
-				fmt->fourcc == V4L2_PIX_FMT_NV12N_10B) {
+				fmt->fourcc == V4L2_PIX_FMT_YUV420N) {
 				mfc_err_dev("Not supported single plane format.\n");
 				return -EINVAL;
 			}
@@ -896,6 +880,10 @@ static int vidioc_s_fmt_vid_out_mplane(struct file *file, void *priv,
 		return ret;
 
 	ctx->src_fmt = find_format(f, MFC_FMT_DEC);
+	if (!ctx->src_fmt) {
+		mfc_err_ctx("Unsupported format for source.\n");
+		return -EINVAL;
+	}
 	ctx->codec_mode = ctx->src_fmt->codec_mode;
 	mfc_info_ctx("Dec input codec(%d): %s\n",
 			ctx->codec_mode, ctx->src_fmt->name);
@@ -1038,8 +1026,7 @@ static int vidioc_reqbufs(struct file *file, void *priv,
 
 		/* Can only request buffers after
 		   an instance has been opened.*/
-		if ((ctx->state == MFCINST_GOT_INST) ||
-			(ctx->state == MFCINST_VPS_PARSED_ONLY)) {
+		if (ctx->state == MFCINST_GOT_INST) {
 			if (reqbufs->count == 0) {
 				mfc_debug(2, "Freeing buffers.\n");
 				ret = vb2_reqbufs(&ctx->vq_src, reqbufs);
@@ -1202,6 +1189,11 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 		return -EIO;
 	}
 
+	if (V4L2_TYPE_IS_MULTIPLANAR(buf->type) && !buf->length) {
+		mfc_err_ctx("multiplanar but length is zero\n");
+		return -EIO;
+	}
+
 	if (buf->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		if (buf->m.planes[0].bytesused > ctx->vq_src.plane_sizes[0]) {
 			mfc_err_ctx("data size (%d) must be less than "
@@ -1261,7 +1253,13 @@ static int vidioc_dqbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 		ret = vb2_dqbuf(&ctx->vq_src, buf, file->f_flags & O_NONBLOCK);
 	} else {
 		ret = vb2_dqbuf(&ctx->vq_dst, buf, file->f_flags & O_NONBLOCK);
+
 		/* Memcpy from dec->ref_info to shared memory */
+		if (buf->index >= MFC_MAX_DPBS) {
+			mfc_err_ctx("buffer index[%d] range over\n", buf->index);
+			return -EINVAL;
+		}
+
 		srcBuf = &dec->ref_info[buf->index];
 		for (ncount = 0; ncount < MFC_MAX_DPBS; ncount++) {
 			if (srcBuf->dpb[ncount].fd[0] == MFC_INFO_INIT_FD)
@@ -1724,8 +1722,7 @@ void s5p_mfc_dec_store_crop_info(struct s5p_mfc_ctx *ctx)
 #define ready_to_get_crop(ctx)			\
 	((ctx->state == MFCINST_HEAD_PARSED) ||	\
 	 (ctx->state == MFCINST_RUNNING) ||	\
-	 (ctx->state == MFCINST_FINISHING) ||	\
-	 (ctx->state == MFCINST_FINISHED))
+	 (ctx->state == MFCINST_FINISHING))
 /* Get cropping information */
 static int vidioc_g_crop(struct file *file, void *priv,
 		struct v4l2_crop *cr)
@@ -2009,11 +2006,6 @@ static int s5p_mfc_buf_init(struct vb2_buffer *vb)
 			buf->planes.raw[1] = NV12N_CBCR_BASE(start_raw,
 							ctx->img_width,
 							ctx->img_height);
-		} else if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_NV12N_10B) {
-			buf->planes.raw[0] = start_raw;
-			buf->planes.raw[1] = NV12N_10B_CBCR_BASE(start_raw,
-							ctx->img_width,
-							ctx->img_height);
 		} else if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420N) {
 			buf->planes.raw[0] = start_raw;
 			buf->planes.raw[1] = YUV420N_CB_BASE(start_raw,
@@ -2177,7 +2169,7 @@ static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
 		return -EINVAL;
 	}
 
-	if (ctx->state == MFCINST_FINISHING || ctx->state == MFCINST_FINISHED)
+	if (ctx->state == MFCINST_FINISHING)
 		s5p_mfc_change_state(ctx, MFCINST_RUNNING);
 
 	/* If context is ready then dev = work->data;schedule it to run */
@@ -2275,7 +2267,7 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 			INIT_LIST_HEAD(&dec->ref_queue);
 			dec->ref_queue_cnt = 0;
 			dec->dynamic_used = 0;
-			dec->err_sync_flag = 0;
+			dec->err_reuse_flag = 0;
 		}
 
 		s5p_mfc_cleanup_queue(&ctx->dst_queue);
@@ -2346,11 +2338,11 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 				} else {
 					mfc_info_ctx("can't parsing CSD!, state = %d\n", ctx->state);
 				}
-				spin_lock_irq(&dev->condlock);
-				set_bit(ctx->num, &dev->ctx_work_bits);
-				spin_unlock_irq(&dev->condlock);
-				s5p_mfc_try_run(dev);
 				if (condition) {
+					spin_lock_irq(&dev->condlock);
+					set_bit(ctx->num, &dev->ctx_work_bits);
+					spin_unlock_irq(&dev->condlock);
+					s5p_mfc_try_run(dev);
 					if (s5p_mfc_wait_for_done_ctx(ctx, condition)) {
 						mfc_err_ctx("special parsing time out\n");
 						s5p_mfc_cleanup_timeout_and_try_run(ctx);
@@ -2631,7 +2623,7 @@ int s5p_mfc_init_dec_ctx(struct s5p_mfc_ctx *ctx)
 	dec->immediate_display = 0;
 	dec->is_dts_mode = 0;
 	dec->tiled_buf_cnt = 0;
-	dec->err_sync_flag = 0;
+	dec->err_reuse_flag = 0;
 
 	dec->is_dynamic_dpb = 0;
 	dec->dynamic_used = 0;

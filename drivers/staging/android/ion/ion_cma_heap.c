@@ -27,8 +27,6 @@
 /* for ion_heap_ops structure */
 #include "ion_priv.h"
 
-#define ION_CMA_ALLOCATE_FAILED -1
-
 struct ion_cma_heap {
 	struct ion_heap heap;
 	struct device *dev;
@@ -74,6 +72,8 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 	struct device *dev = cma_heap->dev;
 	struct ion_cma_buffer_info *info;
 	struct page *page;
+	bool protected = !!(buffer->flags & ION_FLAG_PROTECTED);
+	int ret;
 
 	dev_dbg(dev, "Request buffer allocation len %ld\n", len);
 
@@ -83,13 +83,18 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 	info = kzalloc(sizeof(struct ion_cma_buffer_info), GFP_KERNEL);
 	if (!info) {
 		dev_err(dev, "Can't allocate buffer info\n");
-		return ION_CMA_ALLOCATE_FAILED;
+		return -ENOMEM;
 	}
+
+	/* 8K alignment for the requirement of TZASC */
+	if (protected && align < SZ_8K)
+		align = SZ_8K;
 
 	page = dma_alloc_from_contiguous(dev,
 			(PAGE_ALIGN(len) >> PAGE_SHIFT),
 			(align ? get_order(align) : 0));
 	if (!page) {
+		ret = -ENOMEM;
 		dev_err(dev, "Fail to allocate buffer\n");
 		goto err;
 	}
@@ -100,18 +105,21 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 
 	info->table = kmalloc(sizeof(struct sg_table), GFP_KERNEL);
 	if (!info->table) {
+		ret = -ENOMEM;
 		dev_err(dev, "Fail to allocate sg table\n");
 		goto free_mem;
 	}
 
-	if (ion_cma_get_sgtable
-	    (dev, info->table, info->cpu_addr, info->handle, len))
+	ret = ion_cma_get_sgtable(dev, info->table, info->cpu_addr,
+						info->handle, len);
+	if (ret)
 		goto free_table;
+
 	/* keep this for memory release */
 	buffer->priv_virt = info;
 
 #ifdef CONFIG_ARM64
-	if (!ion_buffer_cached(buffer) && !(buffer->flags & ION_FLAG_PROTECTED)) {
+	if (!ion_buffer_cached(buffer) && !protected) {
 		if (ion_buffer_need_flush_all(buffer))
 			flush_all_cpu_caches();
 		else
@@ -119,7 +127,7 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 									len);
 	}
 #else
-	if (!ion_buffer_cached(buffer) && !(buffer->flags & ION_FLAG_PROTECTED)) {
+	if (!ion_buffer_cached(buffer) && !protected) {
 		if (ion_buffer_need_flush_all(buffer)) {
 			flush_all_cpu_caches();
 		} else {
@@ -131,7 +139,7 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 		}
 	}
 #endif
-	if (buffer->flags & ION_FLAG_PROTECTED)
+	if (protected)
 		ion_secure_protect(buffer);
 
 	dev_dbg(dev, "Allocate buffer %p\n", buffer);
@@ -144,7 +152,8 @@ free_mem:
 			(PAGE_ALIGN(len) >> PAGE_SHIFT));
 err:
 	kfree(info);
-	return ION_CMA_ALLOCATE_FAILED;
+	ion_debug_heap_usage_show(heap);
+	return ret;
 }
 
 static void ion_cma_free(struct ion_buffer *buffer)

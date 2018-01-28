@@ -576,6 +576,14 @@ config REGULATOR_S2MPU03
 	 via I2C bus. S2MPU03 is comprised of high efficient Buck converters
 	 including Dual-Phase Buck converter, Buck-Boost converter, various LDOs.
 
+config REGULATOR_S2MPU05
+	tristate "Samsung S2MPU05 voltage regulator"
+	depends on MFD_SEC_CORE
+	help
+	 This driver supports a Samsung S2MPU05 voltage output regulator
+	 via I2C bus. S2MPU05 is comprised of high efficient Buck converters
+	 including Dual-Phase Buck converter, Buck-Boost converter, various LDOs.
+
 config REGULATOR_S2MPB01
 	tristate "Samsung S2MPB01 voltage regulator"
 	depends on I2C

@@ -51,7 +51,7 @@
 struct gpufreq_cooling_device {
 	int id;
 	struct thermal_cooling_device *cool_dev;
-	unsigned int gpufreq_state;
+	unsigned long gpufreq_state;
 	unsigned int gpufreq_val;
 };
 static DEFINE_IDR(gpufreq_idr);
@@ -137,9 +137,6 @@ static int get_property(unsigned int gpu, unsigned long input,
 					gpu_freq_table;
 
 	if (!output)
-		return -EINVAL;
-
-	if (!table)
 		return -EINVAL;
 
 	cpufreq_for_each_valid_entry(pos, table) {
@@ -314,7 +311,7 @@ int gpufreq_set_cur_temp(bool suspended, unsigned long temp)
 {
 	enum tmu_noti_state_t tstate;
 
-	if (suspended || temp < EXYNOS_COLD_TEMP)
+	if (temp < EXYNOS_COLD_TEMP)
 		tstate = GPU_COLD;
 	else
 		tstate = GPU_NORMAL;

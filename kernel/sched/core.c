@@ -84,6 +84,8 @@
 #include <asm/paravirt.h>
 #endif
 
+#include <linux/sec_debug.h>
+
 #include "sched.h"
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
@@ -1825,15 +1827,7 @@ void __dl_clear_params(struct task_struct *p)
 static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
 	p->on_rq			= 0;
-#ifdef CONFIG_HP_EVENT_THREAD_GROUP
-	p->thread_group_load		= 0;
-	p->nr_thread_group		= 0;
-	raw_spin_lock_init(&p->thread_group_lock);
-	p->hp_boost_requested		= false;
-	p->applied_to_group_load	= false;
-	p->member_of_group		= false;
-	p->group_applied_load		= 0;
-#endif
+
 	p->se.on_rq			= 0;
 	p->se.exec_start		= 0;
 	p->se.sum_exec_runtime		= 0;
@@ -1855,9 +1849,6 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 #ifdef CONFIG_SCHED_HMP
 	p->se.avg.hmp_last_up_migration = 0;
 	p->se.avg.hmp_last_down_migration = 0;
-#ifdef CONFIG_HP_EVENT_HMP_SYSTEM_LOAD
-	p->se.avg.is_big_thread = false;
-#endif
 #endif
 #endif
 #ifdef CONFIG_SCHEDSTATS
@@ -2282,11 +2273,11 @@ static void finish_task_switch(struct rq *rq, struct task_struct *prev)
 	 * If a task dies, then it sets TASK_DEAD in tsk->state and calls
 	 * schedule one last time. The schedule call will never return, and
 	 * the scheduled task must drop that reference.
-	 *
-	 * We must observe prev->state before clearing prev->on_cpu (in
-	 * finish_lock_switch), otherwise a concurrent wakeup can get prev
-	 * running on another CPU and we could rave with its RUNNING -> DEAD
-	 * transition, resulting in a double drop.
+	 * The test for TASK_DEAD must occur while the runqueue locks are
+	 * still held, otherwise prev could be scheduled on another cpu, die
+	 * there before we look at prev->state, and then the reference would
+	 * be dropped twice.
+	 *		Manfred Spraul <manfred@colorfullife.com>
 	 */
 	prev_state = prev->state;
 	vtime_task_switch(prev);
@@ -2713,7 +2704,8 @@ static noinline void __schedule_bug(struct task_struct *prev)
 static inline void schedule_debug(struct task_struct *prev)
 {
 #ifdef CONFIG_SCHED_STACK_END_CHECK
-	BUG_ON(unlikely(task_stack_end_corrupted(prev)));
+	if (task_stack_end_corrupted(prev))
+		panic("corrupted stack end detected inside scheduler\n");
 #endif
 	/*
 	 * Test if we are atomic. Since do_exit() needs to call into
@@ -3359,10 +3351,6 @@ static void __setscheduler_params(struct task_struct *p,
 	set_load_weight(p);
 }
 
-#ifdef CONFIG_SCHED_HMP
-extern struct cpumask hmp_slow_cpu_mask;
-#endif
-
 /* Actually do priority change: must hold pi & rq lock. */
 static void __setscheduler(struct rq *rq, struct task_struct *p,
 			   const struct sched_attr *attr)
@@ -3377,13 +3365,9 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 
 	if (dl_prio(p->prio))
 		p->sched_class = &dl_sched_class;
-	else if (rt_prio(p->prio)) {
+	else if (rt_prio(p->prio))
 		p->sched_class = &rt_sched_class;
-#ifdef CONFIG_SCHED_HMP
-		if (cpumask_equal(&p->cpus_allowed, cpu_all_mask))
-			do_set_cpus_allowed(p, &hmp_slow_cpu_mask);
-#endif
-	} else
+	else
 		p->sched_class = &fair_sched_class;
 }
 
@@ -6183,8 +6167,7 @@ static int sched_domains_curr_level;
 	 SD_SHARE_PKG_RESOURCES |	\
 	 SD_NUMA |			\
 	 SD_ASYM_PACKING |		\
-	 SD_SHARE_POWERDOMAIN |		\
-	 SD_NO_LOAD_BALANCE)
+	 SD_SHARE_POWERDOMAIN)
 
 static struct sched_domain *
 sd_init(struct sched_domain_topology_level *tl, int cpu)
@@ -6207,9 +6190,6 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 			"wrong sd_flags in topology description\n"))
 		sd_flags &= ~TOPOLOGY_SD_FLAGS;
 
-	if (!(sd_flags & SD_NO_LOAD_BALANCE))
-		sd_flags |= SD_LOAD_BALANCE;
-
 	*sd = (struct sched_domain){
 		.min_interval		= sd_weight,
 		.max_interval		= 2*sd_weight,
@@ -6223,7 +6203,7 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 		.wake_idx		= 0,
 		.forkexec_idx		= 0,
 
-		.flags			= 0*SD_LOAD_BALANCE
+		.flags			= 1*SD_LOAD_BALANCE
 					| 1*SD_BALANCE_NEWIDLE
 					| 1*SD_BALANCE_EXEC
 					| 1*SD_BALANCE_FORK
@@ -6286,11 +6266,6 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 	return sd;
 }
 
-int __weak cpu_cpu_flags(void)
-{
-	return 0;
-}
-
 /*
  * Topology list, bottom-up.
  */
@@ -6301,7 +6276,7 @@ static struct sched_domain_topology_level default_topology[] = {
 #ifdef CONFIG_SCHED_MC
 	{ cpu_coregroup_mask, cpu_core_flags, SD_INIT_NAME(MC) },
 #endif
-	{ cpu_cpu_mask, cpu_cpu_flags, SD_INIT_NAME(DIE) },
+	{ cpu_cpu_mask, SD_INIT_NAME(DIE) },
 	{ NULL, },
 };
 
@@ -6982,7 +6957,7 @@ static int cpuset_cpu_inactive(struct notifier_block *nfb, unsigned long action,
 			       void *hcpu)
 {
 	switch (action) {
-	case CPU_DOWN_LATE_PREPARE:
+	case CPU_DOWN_PREPARE:
 		cpuset_update_active_cpus(false);
 		break;
 	case CPU_DOWN_PREPARE_FROZEN:
@@ -7069,6 +7044,10 @@ void __init sched_init(void)
 #ifdef CONFIG_CPUMASK_OFFSTACK
 	alloc_size += num_possible_cpus() * cpumask_size();
 #endif
+
+        sec_gaf_supply_rqinfo(offsetof(struct rq, curr),
+                              offsetof(struct cfs_rq, rq));
+
 	if (alloc_size) {
 		ptr = (unsigned long)kzalloc(alloc_size, GFP_NOWAIT);
 

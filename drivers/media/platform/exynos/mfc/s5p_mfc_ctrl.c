@@ -107,6 +107,30 @@ static int s5p_mfc_reset(struct s5p_mfc_dev *dev)
 	return 0;
 }
 
+int s5p_mfc_ver_major(struct s5p_mfc_dev *dev)
+{
+	int version =  mfc_version(dev);
+
+	if (version > 0xFFF)
+		return ((version >> 12) & 0xF);
+	else if (version > 0xFF)
+		return ((version >> 8) & 0xF);
+	else
+		return ((version >> 4) & 0xF);
+}
+
+int s5p_mfc_ver_minor(struct s5p_mfc_dev *dev)
+{
+	int version =  mfc_version(dev);
+
+	if (version > 0xFFF)
+		return ((version >> 4) & 0xFF);
+	else if (version > 0xFF)
+		return (version & 0xFF);
+	else
+		return (version & 0xF);
+}
+
 /* Initialize hardware */
 static int _s5p_mfc_init_hw(struct s5p_mfc_dev *dev, enum mfc_buf_usage_type buf_type)
 {
@@ -203,9 +227,9 @@ static int _s5p_mfc_init_hw(struct s5p_mfc_dev *dev, enum mfc_buf_usage_type buf
 	if (fimv_info != 'D' && fimv_info != 'E')
 		fimv_info = 'N';
 
-	mfc_info_dev("MFC v%d.%x, F/W: %02xyy, %02xmm, %02xdd (%c)\n",
-		 MFC_VER_MAJOR(dev),
-		 MFC_VER_MINOR(dev),
+	mfc_info_dev("MFC v%d.%d, F/W: %02xyy, %02xmm, %02xdd (%c)\n",
+		 s5p_mfc_ver_major(dev),
+		 s5p_mfc_ver_minor(dev),
 		 s5p_mfc_get_fw_ver_year(),
 		 s5p_mfc_get_fw_ver_month(),
 		 s5p_mfc_get_fw_ver_date(),
@@ -287,9 +311,11 @@ void s5p_mfc_deinit_hw(struct s5p_mfc_dev *dev)
 		s5p_mfc_reset(dev);
 		s5p_mfc_clock_off(dev);
 	} else if (IS_MFCv10X(dev)) {
+		s5p_mfc_clock_on(dev);
 		mfc_info_dev("MFC h/w state: %d\n",
 				MFC_READL(S5P_FIMV_MFC_STATE));
 		MFC_WRITEL(0x1, S5P_FIMV_MFC_CLOCK_OFF);
+		s5p_mfc_clock_off(dev);
 	}
 
 	mfc_debug(2, "mfc deinit completed\n");
@@ -300,6 +326,7 @@ int s5p_mfc_sleep(struct s5p_mfc_dev *dev)
 	struct s5p_mfc_ctx *ctx;
 	int ret;
 	int old_state, i;
+	int need_cache_flush = 0;
 
 	mfc_debug_enter();
 
@@ -320,8 +347,14 @@ int s5p_mfc_sleep(struct s5p_mfc_dev *dev)
 			mfc_err("no mfc context to run\n");
 			return -EINVAL;
 		} else {
+			mfc_info_dev("ctx is changed %d -> %d\n",
+					dev->curr_ctx, ctx->num);
 			dev->curr_ctx = ctx->num;
-			dev->curr_ctx_drm = ctx->is_drm;
+			if (dev->curr_ctx_drm != ctx->is_drm) {
+				need_cache_flush = 1;
+				mfc_info_dev("DRM attribute is changed %d->%d\n",
+						dev->curr_ctx_drm, ctx->is_drm);
+			}
 		}
 	}
 	old_state = ctx->state;
@@ -343,6 +376,22 @@ int s5p_mfc_sleep(struct s5p_mfc_dev *dev)
 	s5p_mfc_change_state(ctx, old_state);
 	s5p_mfc_clock_on(dev);
 	s5p_mfc_clean_dev_int_flags(dev);
+
+	if (need_cache_flush) {
+		s5p_mfc_cmd_host2risc(dev, S5P_FIMV_CH_CACHE_FLUSH, NULL);
+		if (s5p_mfc_wait_for_done_dev(dev, S5P_FIMV_R2H_CMD_CACHE_FLUSH_RET)) {
+			mfc_err_ctx("Failed to flush cache\n");
+			ret = -EINVAL;
+			goto err_mfc_sleep;
+		}
+
+		s5p_mfc_init_memctrl(dev, (ctx->is_drm ? MFCBUF_DRM : MFCBUF_NORMAL));
+		s5p_mfc_clock_off(dev);
+
+		dev->curr_ctx_drm = ctx->is_drm;
+		s5p_mfc_clock_on(dev);
+	}
+
 	ret = s5p_mfc_sleep_cmd(dev);
 	if (ret) {
 		mfc_err_dev("Failed to send command to MFC - timeout.\n");
@@ -393,6 +442,13 @@ int s5p_mfc_wakeup(struct s5p_mfc_dev *dev)
 	s5p_mfc_clock_on(dev);
 
 	dev->wakeup_status = 0;
+	/* SYSMMU default block mode (not enalble/disable) */
+	if (dev->curr_ctx_drm) {
+		ret = s5p_mfc_mem_resume(dev->alloc_ctx);
+		if (ret < 0)
+			mfc_err_dev("Failed to attach iommu\n");
+		s5p_mfc_mem_suspend(dev->alloc_ctx);
+	}
 
 	ret = s5p_mfc_reset(dev);
 	if (ret) {

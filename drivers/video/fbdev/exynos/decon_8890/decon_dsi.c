@@ -66,11 +66,11 @@ int find_subdev_mipi(struct decon_device *decon, int id)
 	}
 
 	decon->output_sd = md->dsim_sd[id];
+	decon->out_type = DECON_OUT_DSI;
+	decon->out_idx = id;
 
-	if (IS_ERR_OR_NULL(decon->output_sd)) {
+	if (IS_ERR_OR_NULL(decon->output_sd))
 		decon_warn("couldn't find dsim%d subdev\n", id);
-		return -ENOMEM;
-	}
 
 	v4l2_subdev_call(decon->output_sd, core, ioctl, DSIM_IOC_GET_LCD_INFO, NULL);
 	decon->lcd_info = (struct decon_lcd *)v4l2_get_subdev_hostdata(decon->output_sd);
@@ -82,14 +82,6 @@ int find_subdev_mipi(struct decon_device *decon, int id)
 		decon->lcd_info->hfp,  decon->lcd_info->hbp,  decon->lcd_info->hsa,
 		 decon->lcd_info->vfp,  decon->lcd_info->vbp,  decon->lcd_info->vsa,
 		 decon->lcd_info->xres,  decon->lcd_info->yres);
-
-	if (decon->pdata->dsi_mode == DSI_MODE_DUAL_DSI) {
-		decon->output_sd1 = md->dsim_sd[decon->pdata->out1_idx];
-		if (IS_ERR_OR_NULL(decon->output_sd1)) {
-			decon_warn("couldn't find 2nd DSIM subdev\n");
-			return -ENOMEM;
-		}
-	}
 
 	return 0;
 }
@@ -132,14 +124,12 @@ int decon_set_par(struct fb_info *info)
 	struct decon_window_regs win_regs;
 	int win_no = win->index;
 
-	dev_info(decon->dev, "%s: state %d\n", __func__, decon->state);
+	memset(&win_regs, 0, sizeof(struct decon_window_regs));
+	dev_info(decon->dev, "setting framebuffer parameters\n");
 
-	if ((decon->pdata->out_type == DECON_OUT_DSI &&
-			decon->state == DECON_STATE_INIT) ||
-			decon->state == DECON_STATE_OFF)
+	if (decon->state == DECON_STATE_OFF)
 		return 0;
 
-	memset(&win_regs, 0, sizeof(struct decon_window_regs));
 	decon_lpd_block_exit(decon);
 
 	decon_reg_wait_for_update_timeout(decon->id, SHADOW_UPDATE_TIMEOUT);
@@ -150,7 +140,10 @@ int decon_set_par(struct fb_info *info)
 	info->fix.xpanstep = fb_panstep(var->xres, var->xres_virtual);
 	info->fix.ypanstep = fb_panstep(var->yres, var->yres_virtual);
 
-	win_regs.wincon = WIN_CONTROL_EN_F;
+	if (decon_reg_is_win_enabled(decon->id, win_no))
+		win_regs.wincon = WIN_CONTROL_EN_F;
+	else
+		win_regs.wincon = 0;
 
 	win_regs.wincon |= wincon(var->transp.length, 0, 0xFF,
 				0xFF, DECON_BLENDING_NONE);
@@ -328,17 +321,10 @@ int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	int shift = 0;
 	struct decon_mode_info psr;
 
-	if ((decon->pdata->out_type == DECON_OUT_DSI &&
-			decon->state == DECON_STATE_INIT) ||
-			decon->state == DECON_STATE_OFF) {
-		decon_warn("%s: decon%d state(%d), UNBLANK missed\n",
-				__func__, decon->id, decon->state);
-		return 0;
-	}
+	decon_lpd_block_exit(decon);
 
 	decon_set_par(info);
 
-	decon_lpd_block_exit(decon);
 	decon->vpp_usage_bitmask |= (1 << decon->default_idma);
 	decon->vpp_used[decon->default_idma] = true;
 	memset(&config, 0, sizeof(struct decon_win_config));
@@ -368,10 +354,6 @@ int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	config.dst.f_w = config.src.f_w;
 	config.dst.f_h = config.src.f_h;
 	sd = decon->mdev->vpp_sd[decon->default_idma];
-	/* Set a default Bandwidth */
-	if (v4l2_subdev_call(sd, core, ioctl, VPP_SET_BW, &config))
-			decon_err("Failed to VPP_SET_BW VPP-%d\n", decon->default_idma);
-
 	if (v4l2_subdev_call(sd, core, ioctl, VPP_WIN_CONFIG, &config)) {
 		decon_err("%s: Failed to config VPP-%d\n", __func__, win->vpp_id);
 		decon->vpp_usage_bitmask &= ~(1 << win->vpp_id);
@@ -504,7 +486,7 @@ irqreturn_t decon_fb_isr_for_eint(int irq, void *dev_id)
 	}
 
 #ifdef CONFIG_DECON_LPD_DISPLAY
-	if ((decon->state == DECON_STATE_ON) && (decon->pdata->out_type == DECON_OUT_DSI)) {
+	if ((decon->state == DECON_STATE_ON) && (decon->out_type == DECON_OUT_DSI)) {
 		if (decon_min_lock_cond(decon))
 			queue_work(decon->lpd_wq, &decon->lpd_work);
 	}
@@ -520,29 +502,20 @@ irqreturn_t decon_fb_isr_for_eint(int irq, void *dev_id)
 int decon_config_eint_for_te(struct platform_device *pdev, struct decon_device *decon)
 {
 	struct device *dev = decon->dev;
-	int gpio, gpio1;
+	int gpio;
 	int ret = 0;
 
 	/* Get IRQ resource and register IRQ handler. */
-	if (of_get_property(dev->of_node, "gpios", NULL) != NULL) {
-		gpio = of_get_gpio(dev->of_node, 0);
-		if (gpio < 0) {
-			decon_err("failed to get proper gpio number\n");
-			return -EINVAL;
-		}
-
-		gpio1 = of_get_gpio(dev->of_node, 1);
-		if (gpio1 < 0)
-			decon_info("This board doesn't support TE GPIO of 2nd LCD\n");
+	gpio = of_get_gpio(dev->of_node, 0);
+	if (gpio < 0) {
+		decon_err("failed to get proper gpio number\n");
+		return -EINVAL;
 	}
 
 	gpio = gpio_to_irq(gpio);
 	decon->irq = gpio;
-
-	decon_dbg("%s: gpio(%d)\n", __func__, gpio);
 	ret = devm_request_irq(dev, gpio, decon_fb_isr_for_eint,
-			IRQF_TRIGGER_RISING, pdev->name, decon);
-
+			  IRQF_TRIGGER_RISING, pdev->name, decon);
 	decon->eint_status = 1;
 
 	return ret;
@@ -579,10 +552,7 @@ static ssize_t decon_psr_info(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct decon_device *decon = dev_get_drvdata(dev);
-	struct decon_lcd *lcd_info = decon->lcd_info;
-	int dsc_offset = (lcd_info->dsc_enabled)? 4: 0;
-
-	return scnprintf(buf, PAGE_SIZE, "%d\n", decon->pdata->psr_mode + dsc_offset);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", decon->pdata->psr_mode);
 }
 
 static DEVICE_ATTR(psr_info, S_IRUGO, decon_psr_info, NULL);

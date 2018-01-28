@@ -20,9 +20,6 @@
 #include <linux/regulator/consumer.h>
 #include <linux/delay.h>
 #include <linux/io.h>
-#if IS_ENABLED(CONFIG_EXYNOS_OTP)
-#include <linux/exynos_otp.h>
-#endif
 
 #include <media/v4l2-subdev.h>
 #include <media/media-entity.h>
@@ -33,7 +30,6 @@
 
 #define DSIM_PAD_SINK		0
 #define DSIM_PADS_NUM		1
-#define DSIM_DDI_ID_LEN		3
 
 #define DSIM_RX_FIFO_READ_DONE	(0x30800002)
 #define DSIM_MAX_RX_FIFO	(64)
@@ -63,8 +59,6 @@ extern struct mipi_dsim_lcd_driver s6e3ha2k_mipi_lcd_driver;
 extern struct mipi_dsim_lcd_driver s6e3hf2_mipi_lcd_driver;
 extern struct mipi_dsim_lcd_driver s6e3hf2_wqhd_mipi_lcd_driver;
 extern struct mipi_dsim_lcd_driver s6e3fa0_mipi_lcd_driver;
-extern struct mipi_dsim_lcd_driver s6e3ha3_mipi_lcd_driver;
-extern struct mipi_dsim_lcd_driver s6e3hf4_mipi_lcd_driver;
 
 enum mipi_dsim_pktgo_state {
 	DSIM_PKTGO_DISABLED,
@@ -127,7 +121,6 @@ struct dsim_device {
 	struct media_pad pad;
 	struct panel_private priv;
 	struct dsim_clks_param clks_param;
-	struct timer_list		cmd_timer;
 	struct phy *phy;
 };
 
@@ -151,7 +144,6 @@ int dsim_write_data(struct dsim_device *dsim, unsigned int data_id,
 		unsigned long data0, unsigned int data1);
 int dsim_read_data(struct dsim_device *dsim, u32 data_id, u32 addr,
 		u32 count, u8 *buf);
-int dsim_wait_for_cmd_done(struct dsim_device *dsim);
 
 #ifdef CONFIG_DECON_MIPI_DSI_PKTGO
 void dsim_pkt_go_ready(struct dsim_device *dsim);
@@ -189,16 +181,6 @@ static inline int dsim_wr_data(u32 id, u32 cmd_id, unsigned long d0, u32 d1)
 		return ret;
 
 	return 0;
-}
-
-static inline int dsim_wait_for_cmd_completion(u32 id)
-{
-	int ret;
-	struct dsim_device *dsim = get_dsim_drvdata(id);
-
-	ret = dsim_wait_for_cmd_done(dsim);
-
-	return ret;
 }
 
 /* register access subroutines */

@@ -92,6 +92,7 @@ struct lpass_info {
 	int			kfc_qos;
 	int			mif_qos;
 	int			int_qos;
+	int			idle_ip_index;
 };
 
 extern void __iomem *lpass_get_regs(void);
@@ -112,14 +113,10 @@ extern void lpass_retention_pad_reg(void);
 extern void lpass_release_pad_reg(void);
 extern void lpass_reset_clk_default(void);
 extern void lpass_init_clk_gate(void);
-extern void lpass_disable_mif_status(bool on);
 
 extern void lpass_update_lpclock(u32 ctrlid, bool idle);
 extern void lpass_update_lpclock_impl(struct device *dev, u32 ctrlid, bool idle);
 
-int lpass_get_dram_usage_count(void);
-void lpass_inc_dram_usage_count(void);
-void lpass_dec_dram_usage_count(void);
 extern void update_cp_available(bool);
 extern bool lpass_i2s_master_mode(void);
 #ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD

@@ -18,8 +18,6 @@
 #include <linux/notifier.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
-#include <asm/cputime.h>
-
 
 /*********************************************************************
  *                        CPUFREQ INTERFACE                          *
@@ -84,8 +82,6 @@ struct cpufreq_policy {
 	struct cpufreq_governor	*governor; /* see below */
 	void			*governor_data;
 	bool			governor_enabled; /* governor start/stop flag */
-
-	unsigned int		hcpus_count; /* number of core to be offed */
 
 	struct work_struct	update; /* if update_policy() needs to be
 					 * called, but you're in IRQ context */
@@ -598,7 +594,6 @@ static inline int cpufreq_boost_enabled(void)
 #endif
 /* the following funtion is for cpufreq core use only */
 struct cpufreq_frequency_table *cpufreq_frequency_get_table(unsigned int cpu);
-struct cpufreq_frequency_table *cpufreq_get_info_table(unsigned int cpu);
 
 /* the following are really really optional */
 extern struct freq_attr cpufreq_freq_attr_scaling_available_freqs;
@@ -610,11 +605,4 @@ unsigned int cpufreq_generic_get(unsigned int cpu);
 int cpufreq_generic_init(struct cpufreq_policy *policy,
 		struct cpufreq_frequency_table *table,
 		unsigned int transition_latency);
-
-/*********************************************************************
- *                         CPUFREQ STATS                             *
- *********************************************************************/
-
-void acct_update_power(struct task_struct *p, cputime_t cputime);
-
 #endif /* _LINUX_CPUFREQ_H */

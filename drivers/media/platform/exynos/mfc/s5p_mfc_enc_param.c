@@ -24,14 +24,17 @@ int s5p_mfc_set_slice_mode(struct s5p_mfc_ctx *ctx)
 		MFC_WRITEL((enc->slice_mode + 0x4), S5P_FIMV_E_MSLICE_MODE);
 	else if (enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB_ROW)
 		MFC_WRITEL((enc->slice_mode - 0x2), S5P_FIMV_E_MSLICE_MODE);
+	else if (enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_FIXED_BYTES)
+		MFC_WRITEL((enc->slice_mode + 0x3), S5P_FIMV_E_MSLICE_MODE);
 	else
 		MFC_WRITEL(enc->slice_mode, S5P_FIMV_E_MSLICE_MODE);
 
 	/* multi-slice MB number or bit size */
-	if (enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SICE_MODE_MAX_MB || \
-			enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB_ROW) {
+	if ((enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SICE_MODE_MAX_MB) ||
+			(enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB_ROW)) {
 		MFC_WRITEL(enc->slice_size.mb, S5P_FIMV_E_MSLICE_SIZE_MB);
-	} else if (enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SICE_MODE_MAX_BYTES) {
+	} else if ((enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SICE_MODE_MAX_BYTES) ||
+			(enc->slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_FIXED_BYTES)) {
 		MFC_WRITEL(enc->slice_size.bits, S5P_FIMV_E_MSLICE_SIZE_BITS);
 	} else {
 		MFC_WRITEL(0x0, S5P_FIMV_E_MSLICE_SIZE_MB);
@@ -158,7 +161,8 @@ static int s5p_mfc_set_enc_params(struct s5p_mfc_ctx *ctx)
 
 	if (p->slice_mode == V4L2_MPEG_VIDEO_MULTI_SICE_MODE_MAX_MB) {
 		enc->slice_size.mb = p->slice_mb;
-	} else if (p->slice_mode == V4L2_MPEG_VIDEO_MULTI_SICE_MODE_MAX_BYTES) {
+	} else if ((p->slice_mode == V4L2_MPEG_VIDEO_MULTI_SICE_MODE_MAX_BYTES) ||
+			(p->slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_FIXED_BYTES)) {
 		enc->slice_size.bits = p->slice_bit;
 	} else if (p->slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB_ROW) {
 		enc->slice_size.mb = p->slice_mb_row * ((ctx->img_width + 15) / 16);
@@ -1091,16 +1095,16 @@ int s5p_mfc_set_enc_params_hevc(struct s5p_mfc_ctx *ctx)
 	}
 	MFC_WRITEL(reg, S5P_FIMV_E_NUM_T_LAYER);
 	mfc_debug(2, "set Temporal SVC : hier_qp_enable %d, enable_ltr %d "
-		"num_hier_layer %d, hier_ref_type %d, NUM_T_LAYER 0x%x\n",
-		p_hevc->hier_qp_enable, p_hevc->enable_ltr,
-		p_hevc->num_hier_layer, p_hevc->hier_ref_type, reg);
+			"num_hier_layer %d, hier_ref_type %d, NUM_T_LAYER 0x%x\n",
+			p_hevc->hier_qp_enable, p_hevc->enable_ltr,
+			p_hevc->num_hier_layer, p_hevc->hier_ref_type, reg);
 	/* QP & Bitrate for each layer */
 	for (i = 0; i < 7; i++) {
 		MFC_WRITEL(p_hevc->hier_qp_layer[i],
-			S5P_FIMV_E_HIERARCHICAL_QP_LAYER0 + i * 4);
+				S5P_FIMV_E_HIERARCHICAL_QP_LAYER0 + i * 4);
 		MFC_WRITEL(p_hevc->hier_bit_layer[i],
-			S5P_FIMV_E_HIERARCHICAL_BIT_RATE_LAYER0 + i * 4);
- 	}
+				S5P_FIMV_E_HIERARCHICAL_BIT_RATE_LAYER0 + i * 4);
+	}
 
 	/* rate control config. */
 	reg = MFC_READL(S5P_FIMV_E_RC_CONFIG);
@@ -1156,12 +1160,6 @@ int s5p_mfc_set_enc_params_hevc(struct s5p_mfc_ctx *ctx)
 	reg &= ~(0xFF);
 	reg |= (p_hevc->rc_frame_qp & 0xFF);
 	MFC_WRITEL(reg, S5P_FIMV_E_FIXED_PICTURE_QP);
-
-	/* ROI enable: it must set on SEQ_START only for HEVC encoder */
-	reg = MFC_READL(S5P_FIMV_E_RC_ROI_CTRL);
-	reg &= ~(0x1);
-	reg |= (p_hevc->roi_enable);
-	MFC_WRITEL(reg, S5P_FIMV_E_RC_ROI_CTRL);
 
 	mfc_debug_leave();
 

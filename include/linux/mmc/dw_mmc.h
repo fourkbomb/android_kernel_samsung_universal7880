@@ -126,6 +126,7 @@ struct mmc_data;
 struct dw_mci {
 	spinlock_t		lock;
 	void __iomem		*regs;
+	unsigned int		channel;
 
 	struct scatterlist	*sg;
 	struct sg_mapping_iter	sg_miter;
@@ -148,11 +149,11 @@ struct dw_mci {
 	void			*sg_cpu;
 	const struct dw_mci_dma_ops	*dma_ops;
 #ifdef CONFIG_MMC_DW_IDMAC
-	unsigned int		ring_size;
+	unsigned short		ring_size;
 #else
 	struct dw_mci_dma_data	*dma_data;
 #endif
-	unsigned int            desc_sz;
+	unsigned short          desc_sz;
 	struct pm_qos_request	pm_qos_int;
 	u32			cmd_status;
 	u32			data_status;
@@ -161,6 +162,7 @@ struct dw_mci {
 	struct tasklet_struct	tasklet;
 	u32			tasklet_state;
 	struct work_struct	card_work;
+	u32			card_detect_cnt;
 	unsigned long		pending_events;
 	unsigned long		completed_events;
 	enum dw_mci_state	state;
@@ -220,6 +222,17 @@ struct dw_mci {
 
 	/* Support system power mode */
 	int idle_ip_index;
+
+	/* For argos */
+	unsigned int transferred_cnt;
+
+	/* Sfr dump */
+	struct dw_mci_sfe_ram_dump	*sfr_dump;
+
+	/* Card Clock In */
+	u32			cclk_in;
+	struct regulator	*vemmc;
+	struct regulator	*vqemmc;
 };
 
 /* DMA ops for Internal/External DMAC interface */
@@ -255,11 +268,21 @@ struct dw_mci_dma_ops {
 #define DW_MCI_QUIRK_HWACG_CTRL			BIT(8)
 /* Enables ultra low power mode */
 #define DW_MCI_QUIRK_ENABLE_ULP			BIT(9)
+/* Use the security management unit */
+#define DW_MCI_QUIRK_USE_SMU			BIT(10)
+/* Switching transfer */
+#define DW_MCI_SW_TRANS				BIT(11)
 
 /* Slot level quirks */
 /* This slot has no write protect */
 #define DW_MCI_SLOT_QUIRK_NO_WRITE_PROTECT	BIT(0)
-
+enum dw_mci_cd_types {
+	DW_MCI_CD_INTERNAL = 1, /* use mmc internal CD line */
+	DW_MCI_CD_EXTERNAL,     /* use external callback */
+	DW_MCI_CD_GPIO,         /* use external gpio pin for CD line */
+	DW_MCI_CD_NONE,         /* no CD line, use polling to detect card */
+	DW_MCI_CD_PERMANENT,    /* no CD line, card permanently wired to host */
+};
 struct dma_pdata;
 
 struct block_settings {
@@ -300,6 +323,15 @@ struct dw_mci_board {
 	unsigned int qos_int_level;
 	unsigned char io_mode;
 
+#if defined(CONFIG_QCOM_WIFI)
+	/* cd_type: type of card detection method */
+
+	int (*ext_cd_init)(void (*notify_func)
+			(void *dev_id, int state), void *dev_id);
+	int (*ext_cd_cleanup)(void (*notify_func)
+			(void *dev_id, int state), void *dev_id);
+#endif /* (CONFIG_QCOM_WIFI */
+	enum dw_mci_cd_types cd_type;
 	struct dw_mci_dma_ops *dma_ops;
 	struct dma_pdata *data;
 	struct block_settings *blk_settings;
@@ -316,5 +348,132 @@ struct dw_mci_board {
 	/* Number of descriptors */
 	unsigned int desc_sz;
 };
+
+#ifdef CONFIG_MMC_DW_IDMAC
+#define IDMAC_INT_CLR		(SDMMC_IDMAC_INT_AI | SDMMC_IDMAC_INT_NI | \
+				 SDMMC_IDMAC_INT_CES | SDMMC_IDMAC_INT_DU | \
+				 SDMMC_IDMAC_INT_FBE | SDMMC_IDMAC_INT_RI | \
+				 SDMMC_IDMAC_INT_TI)
+
+#if defined(CONFIG_MMC_DW_FMP_DM_CRYPT) || defined(CONFIG_MMC_DW_FMP_ECRYPT_FS)
+struct idmac_desc_64addr {
+	u32		des0;	/* Control Descriptor */
+#define IDMAC_DES0_DIC	BIT(1)
+#define IDMAC_DES0_LD	BIT(2)
+#define IDMAC_DES0_FD	BIT(3)
+#define IDMAC_DES0_CH	BIT(4)
+#define IDMAC_DES0_ER	BIT(5)
+#define IDMAC_DES0_CES	BIT(30)
+#define IDMAC_DES0_OWN	BIT(31)
+	u32		des1;	/* Reserved */
+#define IDMAC_64ADDR_SET_BUFFER1_SIZE(d, s) \
+	((d)->des2 = ((d)->des2 & 0x03ffe000) | ((s) & 0x1fff))
+	u32		des2;	/*Buffer sizes */
+#define IDMAC_DES2_FKL	BIT(26)
+#define IDMAC_DES2_DKL	BIT(27)
+#define IDMAC_SET_FAS(d, v) \
+	((d)->des2 = ((d)->des2 & 0xcfffffff) | v << 28)
+#define IDMAC_SET_DAS(d, v) \
+	((d)->des2 = ((d)->des2 & 0x3fffffff) | v << 30)
+	u32		des3;	/* Reserved */
+	u32		des4;	/* Lower 32-bits of Buffer Address Pointer 1*/
+	u32		des5;	/* Upper 32-bits of Buffer Address Pointer 1*/
+	u32		des6;	/* Lower 32-bits of Next Descriptor Address */
+	u32		des7;	/* Upper 32-bits of Next Descriptor Address */
+	u32		des8;	/* File IV 0 */
+	u32		des9;	/* File IV 1 */
+	u32		des10;	/* File IV 2 */
+	u32		des11;	/* File IV 3 */
+	u32		des12;	/* File EncKey 0 */
+	u32		des13;	/* File EncKey 1 */
+	u32		des14;	/* File EncKey 2 */
+	u32		des15;	/* File EncKey 3 */
+	u32		des16;	/* File EncKey 4 */
+	u32		des17;	/* File EncKey 5 */
+	u32		des18;	/* File EncKey 6 */
+	u32		des19;	/* File EncKey 7 */
+	u32		des20;	/* File TwKey 0 */
+	u32		des21;	/* File TwKey 1 */
+	u32		des22;	/* File TwKey 2 */
+	u32		des23;	/* File TwKey 3 */
+	u32		des24;	/* File TwKey 4 */
+	u32		des25;	/* File TwKey 5 */
+	u32		des26;	/* File TwKey 6 */
+	u32		des27;	/* File TwKey 7 */
+	u32		des28;	/* Disk IV 0 */
+	u32		des29;	/* Disk IV 1 */
+	u32		des30;	/* Disk IV 2 */
+	u32		des31;	/* Disk IV 3 */
+#define IDMAC_64ADDR_SET_DESC_CLEAR(d) \
+do {			\
+	(d)->des1 = 0;	\
+	(d)->des2 = 0;	\
+	(d)->des3 = 0;	\
+} while(0)
+#define IDMAC_64ADDR_SET_DESC_ADDR(d, a) \
+do {			\
+	(d)->des6 = ((u32)(a) & 0xffffffff); \
+	(d)->des7 = ((u32)((a) >> 32));	\
+} while(0)
+};
+#else
+struct idmac_desc_64addr {
+	u32		des0;	/* Control Descriptor */
+
+	u32		des1;	/* Reserved */
+
+	u32		des2;	/*Buffer sizes */
+#define IDMAC_64ADDR_SET_BUFFER1_SIZE(d, s) \
+	((d)->des2 = ((d)->des2 & 0x03ffe000) | ((s) & 0x1fff))
+
+	u32		des3;	/* Reserved */
+
+	u32		des4;	/* Lower 32-bits of Buffer Address Pointer 1*/
+	u32		des5;	/* Upper 32-bits of Buffer Address Pointer 1*/
+
+	u32		des6;	/* Lower 32-bits of Next Descriptor Address */
+	u32		des7;	/* Upper 32-bits of Next Descriptor Address */
+#define IDMAC_64ADDR_SET_DESC_CLEAR(d) \
+do {			\
+	(d)->des1 = 0;	\
+	(d)->des2 = 0;	\
+	(d)->des3 = 0;	\
+} while(0)
+#define IDMAC_64ADDR_SET_DESC_ADDR(d, a) \
+do {			\
+	(d)->des6 = ((u32)(a) & 0xffffffff); \
+	(d)->des7 = ((u32)((a) >> 32));	\
+} while(0)
+};
+#endif
+
+struct idmac_desc {
+	u32		des0;	/* Control Descriptor */
+#define IDMAC_DES0_DIC	BIT(1)
+#define IDMAC_DES0_LD	BIT(2)
+#define IDMAC_DES0_FD	BIT(3)
+#define IDMAC_DES0_CH	BIT(4)
+#define IDMAC_DES0_ER	BIT(5)
+#define IDMAC_DES0_CES	BIT(30)
+#define IDMAC_DES0_OWN	BIT(31)
+
+	u32		des1;	/* Buffer sizes */
+#define IDMAC_SET_BUFFER1_SIZE(d, s) \
+	((d)->des1 = ((d)->des1 & 0x03ffe000) | ((s) & 0x1fff))
+
+	u32		des2;	/* buffer 1 physical address */
+
+	u32		des3;	/* buffer 2 physical address */
+#define IDMAC_SET_DESC_ADDR(d, a) \
+do {	\
+	(d)->des3 = (u32)(a);	\
+} while(0)
+};
+#endif /* CONFIG_MMC_DW_IDMAC */
+
+/* FMP bypass/encrypt mode */
+#define CLEAR		0
+#define AES_CBC		1
+#define AES_XTS		2
 
 #endif /* LINUX_MMC_DW_MMC_H */

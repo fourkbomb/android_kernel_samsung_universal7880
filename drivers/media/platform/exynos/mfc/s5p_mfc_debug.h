@@ -70,6 +70,8 @@ extern int debug;
 #define MFC_DEV_NUM_MAX			2
 #define MFC_TRACE_STR_LEN		80
 #define MFC_TRACE_COUNT_MAX		1024
+#define MFC_TRACE_COUNT_PRINT		20
+
 	struct _mfc_trace {
 		unsigned long long time;
 		char str[MFC_TRACE_STR_LEN];

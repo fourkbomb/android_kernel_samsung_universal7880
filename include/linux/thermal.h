@@ -69,7 +69,6 @@ struct thermal_cooling_device;
 enum thermal_device_mode {
 	THERMAL_DEVICE_DISABLED = 0,
 	THERMAL_DEVICE_ENABLED,
-	THERMAL_DEVICE_PAUSED,
 };
 
 enum thermal_trip_type {
@@ -224,10 +223,7 @@ struct thermal_zone_device {
 	struct mutex lock;
 	struct list_head node;
 	struct delayed_work poll_queue;
-#if defined(CONFIG_EXYNOS_BIG_FREQ_BOOST)
-	int device_enable;
-#endif
-#ifdef CONFIG_SCHED_HMP
+#ifdef CONFIG_SCHED_MC
 	unsigned int poll_queue_cpu;
 #endif
 };

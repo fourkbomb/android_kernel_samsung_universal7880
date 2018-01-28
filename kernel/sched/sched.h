@@ -547,8 +547,6 @@ struct rq {
 	unsigned long nr_load_updates;
 	u64 nr_switches;
 
-	unsigned long sysload_avg_ratio;
-
 	struct cfs_rq cfs;
 	struct rt_rq rt;
 	struct dl_rq dl;
@@ -1005,10 +1003,9 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * After ->on_cpu is cleared, the task can be moved to a different CPU.
 	 * We must ensure this doesn't happen until the switch is completely
 	 * finished.
-	 *
-	 * Pairs with the control dependency and rmb in try_to_wake_up().
 	 */
-	smp_store_release(&prev->on_cpu, 0);
+	smp_wmb();
+	prev->on_cpu = 0;
 #endif
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
@@ -1235,11 +1232,18 @@ extern void update_idle_cpu_load(struct rq *this_rq);
 
 extern void init_task_runnable_average(struct task_struct *p);
 
+#ifdef CONFIG_SCHED_AVG_NR_RUNNING
+extern void sched_update_avg_nr_running(int cpu, unsigned long nr_running);
+#else
+static inline void sched_update_avg_nr_running(int cpu, unsigned long nr_running) { }
+#endif
+
 static inline void add_nr_running(struct rq *rq, unsigned count)
 {
 	unsigned prev_nr = rq->nr_running;
 
 	rq->nr_running = prev_nr + count;
+	sched_update_avg_nr_running(cpu_of(rq), rq->nr_running);
 
 	if (prev_nr < 2 && rq->nr_running >= 2) {
 #ifdef CONFIG_SMP
@@ -1266,6 +1270,7 @@ static inline void add_nr_running(struct rq *rq, unsigned count)
 static inline void sub_nr_running(struct rq *rq, unsigned count)
 {
 	rq->nr_running -= count;
+	sched_update_avg_nr_running(cpu_of(rq), rq->nr_running);
 }
 
 static inline void rq_last_tick_reset(struct rq *rq)

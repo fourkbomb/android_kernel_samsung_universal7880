@@ -52,10 +52,13 @@
 #include <asm/sections.h>
 #include <asm/tlbflush.h>
 #include <asm/ptrace.h>
-#include <soc/samsung/cpufreq.h>
+#include <asm/cputype.h>
+#include <asm/topology.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/ipi.h>
+
+extern void machine_crash_nonpanic_core(void *unused);
 
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
@@ -80,12 +83,6 @@ enum ipi_msg_type {
  */
 static int boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
-	int ret;
-
-	ret = exynos_cpufreq_verify_possible_hotplug(cpu);
-	if (ret)
-		return ret;
-
 	if (cpu_ops[cpu]->cpu_boot)
 		return cpu_ops[cpu]->cpu_boot(cpu);
 
@@ -570,7 +567,7 @@ static void ipi_cpu_stop(unsigned int cpu, struct pt_regs *regs)
 	exynos_ss_save_context(regs);
 
 	while (1)
-		cpu_relax();
+		wfi();
 }
 
 /*
@@ -627,7 +624,7 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		break;
 #endif
 	case IPI_WAKEUP:
-		pr_info("%s: IPI_WAKEUP\n", __func__);
+		pr_debug("%s: IPI_WAKEUP\n", __func__);
 		break;
 
 	default:
@@ -663,6 +660,9 @@ void smp_send_stop(void)
 
 		cpumask_copy(&mask, cpu_online_mask);
 		cpu_clear(smp_processor_id(), mask);
+		/* for debug */
+		pr_info("SMP: cpu_online_mask %lx , cpumask_t.bits %lx\n", 
+			cpu_online_mask->bits[0], mask.bits[0]);
 
 		smp_cross_call(&mask, IPI_CPU_STOP);
 	}
@@ -691,13 +691,6 @@ static void flush_all_cpu_cache(void *info)
 	flush_cache_louis();
 }
 
-#ifdef CONFIG_SCHED_HMP
-
-#include <asm/cputype.h>
-
-extern struct cpumask hmp_slow_cpu_mask;
-extern struct cpumask hmp_fast_cpu_mask;
-
 static void flush_all_cluster_cache(void *info)
 {
 	flush_cache_all();
@@ -705,29 +698,26 @@ static void flush_all_cluster_cache(void *info)
 
 void flush_all_cpu_caches(void)
 {
-        unsigned int cpu, cluster, target_cpu;
+	int cpu, cluster, target_cluster = -1;
+	struct cpumask shared_cache_flush_mask;
 
 	preempt_disable();
 	cpu = smp_processor_id();
 	cluster = MPIDR_AFFINITY_LEVEL(cpu_logical_map(cpu), 1);
+	cpumask_clear(&shared_cache_flush_mask);
 
-	if (!cluster)
-		target_cpu = first_cpu(hmp_slow_cpu_mask);
-	else
-		target_cpu = first_cpu(hmp_fast_cpu_mask);
+	/* make cpumask to flush shared cache */
+	for_each_online_cpu(cpu)
+		if (cluster != topology_physical_package_id(cpu) &&
+			target_cluster != topology_physical_package_id(cpu)) {
+			target_cluster = topology_physical_package_id(cpu);
+			cpumask_set_cpu(cpu, &shared_cache_flush_mask);
+		}
 
 	smp_call_function(flush_all_cpu_cache, NULL, 1);
-	smp_call_function_single(target_cpu, flush_all_cluster_cache, NULL, 1);
+	smp_call_function_many(&shared_cache_flush_mask,
+			flush_all_cluster_cache, NULL, 1);
 	flush_cache_all();
 
 	preempt_enable();
 }
-#else
-void flush_all_cpu_caches(void)
-{
-	preempt_disable();
-	smp_call_function(flush_all_cpu_cache, NULL, 1);
-	flush_cache_all();
-	preempt_enable();
-}
-#endif

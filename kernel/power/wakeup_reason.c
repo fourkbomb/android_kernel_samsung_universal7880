@@ -28,7 +28,11 @@
 #include <linux/suspend.h>
 #include <linux/debugfs.h>
 
+#if defined (CONFIG_SOC_EXYNOS7870) || defined (CONFIG_SOC_EXYNOS7880)
+#define MAX_WAKEUP_REASON_IRQS 24
+#else
 #define MAX_WAKEUP_REASON_IRQS 32
+#endif
 static int irq_list[MAX_WAKEUP_REASON_IRQS];
 static int irqcount;
 static bool suspend_abort;

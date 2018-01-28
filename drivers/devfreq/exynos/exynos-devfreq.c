@@ -31,6 +31,9 @@
 
 #include "../governor.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/exynos.h>
+
 static int exynos_devfreq_tmu_notifier(struct notifier_block *nb,
 					unsigned long event, void *v);
 static int exynos_devfreq_set_voltage(struct device *dev, u32 *target_volt,
@@ -772,7 +775,7 @@ int exynos_devfreq_sync_voltage(enum exynos_devfreq_type type, bool turn_on)
 				ret = PTR_ERR(target_opp);
 				goto out;
 			}
-			data->new_volt = dev_pm_opp_get_voltage(target_opp);
+			data->new_volt = (u32)dev_pm_opp_get_voltage(target_opp);
 			rcu_read_unlock();
 
 			ret = exynos_devfreq_set_voltage(data->dev, &data->new_volt, data);
@@ -799,8 +802,10 @@ int exynos_devfreq_sync_voltage(enum exynos_devfreq_type type, bool turn_on)
 			data->vdd = NULL;
 		}
 
+#ifdef CONFIG_REGULATOR
 		if (data->vdd_dummy)
 			regulator_sync_voltage(data->vdd_dummy);
+#endif
 	}
 
 out:
@@ -982,7 +987,7 @@ static int exynos_devfreq_tmu_notifier(struct notifier_block *nb,
 			ret = PTR_ERR(target_opp);
 			goto out2;
 		}
-		data->new_volt = dev_pm_opp_get_voltage(target_opp);
+		data->new_volt = (u32)dev_pm_opp_get_voltage(target_opp);
 		rcu_read_unlock();
 
 		ret = exynos_devfreq_set_voltage(data->dev, &data->new_volt, data);
@@ -1126,7 +1131,7 @@ static int exynos_devfreq_target(struct device *dev,
 	}
 
 	*target_freq = dev_pm_opp_get_freq(target_opp);
-	target_volt = dev_pm_opp_get_voltage(target_opp);
+	target_volt = (u32)dev_pm_opp_get_voltage(target_opp);
 	rcu_read_unlock();
 
 	target_idx = exynos_devfreq_get_opp_idx(data->opp_list, data->max_state,
@@ -1159,6 +1164,7 @@ static int exynos_devfreq_target(struct device *dev,
 	data->set_volt_order = exynos_devfreq_set_volt_order(data);
 
 	exynos_ss_freq(data->ess_flag, data->old_freq, data->new_freq, ESS_FLAG_IN);
+	trace_exynos_devfreq_in(data->ess_flag, data->old_freq, data->new_freq);
 
 	if (data->use_cl_dvfs && !data->volt_offset) {
 		if (data->ops.cl_dvfs_stop) {
@@ -1202,7 +1208,7 @@ static int exynos_devfreq_target(struct device *dev,
 				goto out;
 			}
 
-			switch_volt = dev_pm_opp_get_voltage(switch_opp);
+			switch_volt = (u32)dev_pm_opp_get_voltage(switch_opp);
 			rcu_read_unlock();
 		}
 
@@ -1341,7 +1347,7 @@ static int exynos_devfreq_target(struct device *dev,
 
 	if (data->use_cl_dvfs && !data->volt_offset) {
 		if (data->ops.cl_dvfs_start) {
-			data->ops.cl_dvfs_start(data);
+			ret = data->ops.cl_dvfs_start(data);
 			if (ret) {
 				dev_err(dev, "cl_dvfs does not start\n");
 				goto out;
@@ -1350,6 +1356,7 @@ static int exynos_devfreq_target(struct device *dev,
 	}
 
 	exynos_ss_freq(data->ess_flag, data->old_freq, data->new_freq, ESS_FLAG_OUT);
+	trace_exynos_devfreq_out(data->ess_flag, data->old_freq, data->new_freq);
 
 	data->old_freq = data->new_freq;
 	data->old_idx = data->new_idx;
@@ -1474,6 +1481,8 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct exynos_devfreq_data *data;
+	struct dev_pm_opp *init_opp;
+	unsigned long init_freq = 0;
 
 	data = kzalloc(sizeof(struct exynos_devfreq_data), GFP_KERNEL);
 	if (data == NULL) {
@@ -1524,6 +1533,14 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
 		}
 	}
 
+	if (data->ops.init) {
+		ret = data->ops.init(data->dev, data);
+		if (ret) {
+			dev_err(data->dev, "failed devfreq init\n");
+			goto err_devfreq_init;
+		}
+	}
+
 	data->devfreq_profile.freq_table = kzalloc(sizeof(int) * data->max_state, GFP_KERNEL);
 	if (data->devfreq_profile.freq_table == NULL) {
 		dev_err(data->dev, "failed to allocate for freq_table\n");
@@ -1562,7 +1579,7 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
 		}
 	}
 
-	data->old_freq = data->devfreq_profile.initial_freq;
+	data->old_freq = (u32)data->devfreq_profile.initial_freq;
 	data->old_idx = exynos_devfreq_get_opp_idx(data->opp_list, data->max_state,
 							data->old_freq);
 	if (data->old_idx < 0) {
@@ -1570,15 +1587,30 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
 		goto err_old_idx;
 	}
 
-	data->new_volt = regulator_get_voltage(data->vdd);
-	ret = exynos_devfreq_set_voltage(data->dev, &data->new_volt, data);
-	if (ret) {
-		dev_err(data->dev, "failed set voltage in probe (%ukhz:%uuV)\n",
-				data->old_freq, data->new_volt);
-		goto err_set_voltage;
+	if (data->use_regulator) {
+		rcu_read_lock();
+		init_freq = (unsigned long)data->old_freq;
+		init_opp = devfreq_recommended_opp(data->dev, &init_freq, 0);
+		if (IS_ERR(init_opp)) {
+			rcu_read_unlock();
+			dev_err(data->dev, "not found valid OPP table for sync\n");
+			ret = PTR_ERR(init_opp);
+			goto err_get_opp;
+		}
+		data->new_volt = (u32)dev_pm_opp_get_voltage(init_opp);
+		rcu_read_unlock();
+
+		dev_info(data->dev, "Initial Frequency: %ld, Initial Voltage: %d\n", init_freq, data->new_volt);
+
+		ret = exynos_devfreq_set_voltage(data->dev, &data->new_volt, data);
+		if (ret) {
+			dev_err(data->dev, "failed set voltage in probe (%ukhz:%uuV)\n",
+					data->old_freq, data->new_volt);
+			goto err_set_voltage;
+		}
+		data->old_volt = data->new_volt;
 	}
 
-	data->old_volt = data->new_volt;
 
 	/* This flag guarantees initial frequency during boot time */
 	data->devfreq_disabled = true;
@@ -1600,36 +1632,26 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
 								data->max_freq);
 	pm_qos_add_request(&data->default_pm_qos, (int)data->pm_qos_class, data->default_qos);
 	pm_qos_add_request(&data->boot_pm_qos, (int)data->pm_qos_class, data->default_qos);
-	pm_qos_update_request_timeout(&data->boot_pm_qos, data->devfreq_profile.initial_freq,
-					data->boot_qos_timeout * USEC_PER_SEC);
 
-	if (data->ops.init) {
-		ret = data->ops.init(data->dev, data);
-		if (ret) {
-			dev_err(data->dev, "failed devfreq init\n");
-			goto err_devfreq_init;
-		}
-	}
-
-	/* if polling_ms is 0, update_devfreq function is called by ppmu */
-	if (data->devfreq_profile.polling_ms == 0) {
-		data->ppmu_nb = kzalloc(sizeof(struct devfreq_notifier_block), GFP_KERNEL);
-		if (data->ppmu_nb == NULL) {
-			dev_err(data->dev, "failed to allocate notifier block\n");
-			ret = -ENOMEM;
-			goto err_ppmu_nb;
-		}
-
-		data->ppmu_nb->df = data->devfreq;
-		data->ppmu_nb->nb.notifier_call = exynos_devfreq_notifier;
-		data->last_monitor_jiffies = get_jiffies_64();
-	}
-
-	/*
-	 * The PPMU data should be register.
-	 * And if polling_ms is 0, ppmu notifier should be register in callback.
-	 */
 	if (data->use_ppmu) {
+		/* if polling_ms is 0, update_devfreq function is called by ppmu */
+		if (data->devfreq_profile.polling_ms == 0) {
+			data->ppmu_nb = kzalloc(sizeof(struct devfreq_notifier_block), GFP_KERNEL);
+			if (data->ppmu_nb == NULL) {
+				dev_err(data->dev, "failed to allocate notifier block\n");
+				ret = -ENOMEM;
+				goto err_ppmu_nb;
+			}
+
+			data->ppmu_nb->df = data->devfreq;
+			data->ppmu_nb->nb.notifier_call = exynos_devfreq_notifier;
+			data->last_monitor_jiffies = get_jiffies_64();
+		}
+
+		/*
+		 * The PPMU data should be register.
+		 * And if polling_ms is 0, ppmu notifier should be register in callback.
+		 */
 		if (data->ops.ppmu_register) {
 			ret = data->ops.ppmu_register(data->dev, data);
 			if (ret) {
@@ -1677,6 +1699,9 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
 
 	data->devfreq_disabled = false;
 
+	pm_qos_update_request_timeout(&data->boot_pm_qos, data->devfreq_profile.initial_freq,
+					data->boot_qos_timeout * USEC_PER_SEC);
+
 	dev_info(data->dev, "devfreq is initialized!!\n");
 
 	return 0;
@@ -1706,6 +1731,7 @@ err_devfreq_init:
 	devfreq_remove_device(data->devfreq);
 err_devfreq:
 err_set_voltage:
+err_get_opp:
 err_old_idx:
 	if (data->use_regulator_dummy) {
 		if (data->vdd_dummy)
@@ -1803,7 +1829,6 @@ static const struct dev_pm_ops exynos_devfreq_pm_ops = {
 };
 
 static struct platform_driver exynos_devfreq_driver = {
-	.probe		= exynos_devfreq_probe,
 	.remove		= exynos_devfreq_remove,
 	.id_table	= exynos_devfreq_driver_ids,
 	.driver = {
@@ -1814,7 +1839,7 @@ static struct platform_driver exynos_devfreq_driver = {
 	},
 };
 
-module_platform_driver(exynos_devfreq_driver);
+module_platform_driver_probe(exynos_devfreq_driver, exynos_devfreq_probe);
 
 MODULE_AUTHOR("Taekki Kim <taekki.kim@samsung.com>");
 MODULE_DESCRIPTION("Samsung EXYNOS Soc series devfreq common driver");

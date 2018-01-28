@@ -54,6 +54,19 @@ config ARM64_RANDOMIZE_TEXT_OFFSET
 	  only. Bootloaders must make no assumptions regarding the value
 	  of TEXT_OFFSET and platforms must not require a specific
 	  value.
+	  
+config TEXT_OFFSET_OVERRIDE
+	bool "Enable CONFIG_TEXT_OFFSET"
+	default n
+	help
+	  It defines the start of .text of kernel.
+	  Some SOCes may not start from 0x80000, and it want
+	  to reserve a memory region. So select this config.
+
+config TEXT_OFFSET
+	hex "Specific kernel TEXT offset from PAGE_OFFSET"
+	depends on TEXT_OFFSET_OVERRIDE
+	default 0x00080000
 
 config DEBUG_SET_MODULE_RONX
         bool "Set loadable kernel module data as NX and text as RO"

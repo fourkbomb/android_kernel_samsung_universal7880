@@ -149,9 +149,6 @@ static LIST_HEAD(drvdata_list);
 #define TXBUSY    (1<<3)
 
 #define SPI_DBG_MODE (0x1 << 0)
-#define SD_INFO_PA			0x10000004
-
-u32 fusing_bit;
 
 /**
  * struct s3c64xx_spi_info - SPI Controller hardware info
@@ -251,24 +248,60 @@ static void s3c64xx_spi_dump_reg(struct s3c64xx_spi_driver_data *sdd)
 				readl(regs + S3C64XX_SPI_STATUS));
 	dev_err(dev, "- PACKET_CNT 0x%08x\n",
 				readl(regs + S3C64XX_SPI_PACKET_CNT));
-
+	dev_err(dev, "- SPI clock : %u(%lu)\n",
+				sdd->cur_speed, clk_get_rate(sdd->src_clk));
+	dev_err(dev, "- SPI clock enable count: pclk %d, sclk %d\n",
+				sdd->clk->enable_count, sdd->src_clk->enable_count);
 }
 static void flush_fifo(struct s3c64xx_spi_driver_data *sdd)
 {
 	void __iomem *regs = sdd->regs;
 	unsigned long loops;
-	u32 val;
+	u32 val, val_read;
 
 	writel(0, regs + S3C64XX_SPI_PACKET_CNT);
 
+	if (sdd->port_id == 2) {
+		exynos_ss_printk("- SPI clock : %u(%lu)\n",
+				sdd->cur_speed, clk_get_rate(sdd->src_clk));
+		exynos_ss_printk("- SPI clock enable count: pclk %d, sclk %d\n",
+				sdd->clk->enable_count, sdd->src_clk->enable_count);
+	}
+
 	val = readl(regs + S3C64XX_SPI_CH_CFG);
+	if (sdd->port_id == 2)
+		exynos_ss_printk("1 in %s CH_CFG read vaule is 0x%08x\n", __func__, val);
+
 	val &= ~(S3C64XX_SPI_CH_RXCH_ON | S3C64XX_SPI_CH_TXCH_ON);
 	writel(val, regs + S3C64XX_SPI_CH_CFG);
 
+	loops = msecs_to_loops(1);
+	do {
+		val_read = readl(regs + S3C64XX_SPI_CH_CFG);
+	} while ((val != val_read) && loops--);
+
+	if (loops == 0)
+		dev_warn(&sdd->pdev->dev, "1 in %s Timed out writing to CH_CFG 0x%08x\n",
+			__func__, readl(regs + S3C64XX_SPI_CH_CFG));
+
+
 	val = readl(regs + S3C64XX_SPI_CH_CFG);
+	if (sdd->port_id == 2)
+		exynos_ss_printk("2 in %s CH_CFG read vaule is 0x%08x\n", __func__, val);
+
 	val |= S3C64XX_SPI_CH_SW_RST;
 	val &= ~S3C64XX_SPI_CH_HS_EN;
 	writel(val, regs + S3C64XX_SPI_CH_CFG);
+
+	loops = msecs_to_loops(1);
+	do {
+		val_read = readl(regs + S3C64XX_SPI_CH_CFG);
+	} while ((val != val_read) && loops--);
+
+	if (loops == 0)
+		dev_warn(&sdd->pdev->dev, "2 in %s Timed out writing to CH_CFG 0x%08x\n",
+			__func__, readl(regs + S3C64XX_SPI_CH_CFG));
+
 
 	/* Flush TxFIFO*/
 	loops = msecs_to_loops(1);
@@ -293,8 +326,20 @@ static void flush_fifo(struct s3c64xx_spi_driver_data *sdd)
 		dev_warn(&sdd->pdev->dev, "Timed out flushing RX FIFO\n");
 
 	val = readl(regs + S3C64XX_SPI_CH_CFG);
+	if (sdd->port_id == 2)
+		exynos_ss_printk("3 in %s CH_CFG read vaule is 0x%08x\n", __func__, val);
+
 	val &= ~S3C64XX_SPI_CH_SW_RST;
 	writel(val, regs + S3C64XX_SPI_CH_CFG);
+
+	loops = msecs_to_loops(1);
+	do {
+		val_read = readl(regs + S3C64XX_SPI_CH_CFG);
+	} while ((val != val_read) && loops--);
+
+	if (loops == 0)
+		dev_warn(&sdd->pdev->dev, "3 in %s Timed out writing to CH_CFG 0x%08x\n",
+			__func__, readl(regs + S3C64XX_SPI_CH_CFG));
 
 	val = readl(regs + S3C64XX_SPI_MODE_CFG);
 	val &= ~(S3C64XX_SPI_MODE_TXDMA_ON | S3C64XX_SPI_MODE_RXDMA_ON);
@@ -398,28 +443,18 @@ static int acquire_dma(struct s3c64xx_spi_driver_data *sdd)
 {
 	struct samsung_dma_req req;
 	struct device *dev = &sdd->pdev->dev;
-	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
 
 	sdd->ops = samsung_dma_get_ops();
 
 	req.cap = DMA_SLAVE;
 	req.client = &s3c64xx_spi_dma_client;
 
-	if ((sci->check_fusing_bit) && (fusing_bit & 0xC0000000)) {
-		if (sdd->rx_dma.ch == NULL)
-			sdd->rx_dma.ch = (void *)sdd->ops->request(sdd->rx_dma.dmach,
-							&req, dev, "rx-s");
-		if (sdd->tx_dma.ch == NULL)
-			sdd->tx_dma.ch = (void *)sdd->ops->request(sdd->tx_dma.dmach,
-							&req, dev, "tx-s");
-	} else {
-		if (sdd->rx_dma.ch == NULL)
-			sdd->rx_dma.ch = (void *)sdd->ops->request(sdd->rx_dma.dmach,
+	if (sdd->rx_dma.ch == NULL)
+		sdd->rx_dma.ch = (void *)sdd->ops->request(sdd->rx_dma.dmach,
 							&req, dev, "rx");
-		if (sdd->tx_dma.ch == NULL)
-			sdd->tx_dma.ch = (void *)sdd->ops->request(sdd->tx_dma.dmach,
+	if (sdd->tx_dma.ch == NULL)
+		sdd->tx_dma.ch = (void *)sdd->ops->request(sdd->tx_dma.dmach,
 							&req, dev, "tx");
-	}
 
 	return 1;
 }
@@ -446,6 +481,8 @@ static int s3c64xx_spi_prepare_transfer(struct spi_master *spi)
 	ret = pm_runtime_get_sync(&sdd->pdev->dev);
 	if(ret < 0)
 		return ret;
+	if (sdd->port_id == 2)
+	        exynos_ss_printk("%s runtime get_sync!!!\n", __func__);
 #endif
 
 	if (sci->need_hw_init)
@@ -487,6 +524,8 @@ static int s3c64xx_spi_unprepare_transfer(struct spi_master *spi)
 	ret = pm_runtime_put_autosuspend(&sdd->pdev->dev);
 	if(ret < 0)
 		return ret;
+	if (sdd->port_id == 2)
+	        exynos_ss_printk("%s runtime put autosuspend!!!\n", __func__);
 #endif
 
 	return 0;
@@ -507,9 +546,19 @@ static void enable_datapath(struct s3c64xx_spi_driver_data *sdd,
 				struct spi_transfer *xfer, int dma_mode)
 {
 	void __iomem *regs = sdd->regs;
-	u32 modecfg, chcfg, dma_burst_len;
+	unsigned long loops;
+	u32 modecfg, chcfg, dma_burst_len, val_read;
+
+	if (sdd->port_id == 2) {
+		exynos_ss_printk("- SPI requested clock : %u\n", sdd->cur_speed);
+		exynos_ss_printk("- SPI clock enable count: pclk %d, sclk %d\n",
+				sdd->clk->enable_count, sdd->src_clk->enable_count);
+	}
 
 	chcfg = readl(regs + S3C64XX_SPI_CH_CFG);
+	if (sdd->port_id == 2)
+		exynos_ss_printk("1 in %s CH_CFG read vaule is 0x%08x\n", __func__, chcfg);
+
 	chcfg &= ~S3C64XX_SPI_CH_TXCH_ON;
 
 	modecfg = readl(regs + S3C64XX_SPI_MODE_CFG);
@@ -579,6 +628,15 @@ static void enable_datapath(struct s3c64xx_spi_driver_data *sdd,
 
 	writel(modecfg, regs + S3C64XX_SPI_MODE_CFG);
 	writel(chcfg, regs + S3C64XX_SPI_CH_CFG);
+
+	loops = msecs_to_loops(1);
+	do {
+		val_read = readl(regs + S3C64XX_SPI_CH_CFG);
+	} while ((chcfg != val_read) && loops--);
+
+	if (loops == 0)
+		dev_warn(&sdd->pdev->dev, "1 in %s Timed out writing to CH_CFG 0x%08x\n",
+			__func__, readl(regs + S3C64XX_SPI_CH_CFG));
 }
 
 static inline void enable_cs(struct s3c64xx_spi_driver_data *sdd,
@@ -905,6 +963,15 @@ static int s3c64xx_spi_transfer_one_message(struct spi_master *master,
 	u32 speed;
 	u8 bpw;
 
+#ifdef CONFIG_PM_RUNTIME
+	if (sdd->src_clk->enable_count == 0) {
+		exynos_update_ip_idle_status(sdd->idle_ip_index, 0);
+		clk_prepare_enable(sdd->src_clk);
+	}
+	if (sdd->clk->enable_count == 0)
+		clk_prepare_enable(sdd->clk);
+#endif
+
 	/* If Master's(controller) state differs from that needed by Slave */
 	if (sdd->cur_speed != spi->max_speed_hz
 			|| sdd->cur_mode != spi->mode
@@ -1148,6 +1215,15 @@ static int s3c64xx_spi_setup(struct spi_device *spi)
 		return -ENODEV;
 	}
 
+#ifdef ENABLE_SENSORS_FPRINT_SECURE
+	if (sdd->port_id == CONFIG_SENSORS_FP_SPI_NUMBER)
+		return 0;
+#endif
+#ifdef CONFIG_ESE_SECURE
+        if (sdd->port_id == CONFIG_ESE_SECURE_SPI_PORT)
+                return 0;
+#endif
+
 	if (!spi_get_ctldata(spi)) {
 		if(cs->line != 0) {
 			err = gpio_request_one(cs->line, GPIOF_OUT_INIT_HIGH,
@@ -1315,6 +1391,14 @@ static void s3c64xx_spi_hwinit(struct s3c64xx_spi_driver_data *sdd, int channel)
 	void __iomem *regs = sdd->regs;
 	unsigned int val;
 
+#ifdef ENABLE_SENSORS_FPRINT_SECURE
+	if (channel == CONFIG_SENSORS_FP_SPI_NUMBER)
+		return;
+#endif
+#ifdef CONFIG_ESE_SECURE
+        if (channel == CONFIG_ESE_SECURE_SPI_PORT)
+                return;
+#endif
 	sdd->cur_speed = 0;
 
 	writel(S3C64XX_SPI_SLAVE_SIG_INACT, sdd->regs + S3C64XX_SPI_SLAVE_SEL);
@@ -1376,11 +1460,6 @@ static struct s3c64xx_spi_info *s3c64xx_spi_parse_dt(struct device *dev)
 		sci->secure_mode = SECURE_MODE;
 	else
 		sci->secure_mode = NONSECURE_MODE;
-
-	if (of_get_property(dev->of_node, "check-fusing-bit", NULL))
-		sci->check_fusing_bit = CHECK_FUSING_BIT;
-	else
-		sci->check_fusing_bit = NON_CHECK_FUSING_BIT;
 
 	if (of_property_read_u32(dev->of_node, "samsung,spi-src-clk", &temp)) {
 		dev_warn(dev, "spi bus clock parent not specified, using clock at index 0 as parent\n");
@@ -1460,7 +1539,6 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 	int ret, irq;
 	char clk_name[16];
 	int fifosize;
-	u32 __iomem	*fusing_bit_addr;
 
 	if (!sci && pdev->dev.of_node) {
 		sci = s3c64xx_spi_parse_dt(&pdev->dev);
@@ -1523,17 +1601,6 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 	}
 
 	sdd->cur_bpw = 8;
-
-	if (sci->check_fusing_bit) {
-		fusing_bit_addr = ioremap(SD_INFO_PA, SZ_4);
-		if (!fusing_bit_addr) {
-			dev_err(&pdev->dev, "failed to ioremap fusing_bit address!!!!\n");
-			return -ENOMEM;
-		} else {
-			fusing_bit = __raw_readl(fusing_bit_addr);
-			dev_err(&pdev->dev, "fusing_bit value is 0x%x\n", fusing_bit);
-		}
-	}
 
 	if (sci->dma_mode == DMA_MODE) {
 		if (!sdd->pdev->dev.of_node) {
@@ -1675,9 +1742,18 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 		goto err3;
 	}
 
-	writel(S3C64XX_SPI_INT_RX_OVERRUN_EN | S3C64XX_SPI_INT_RX_UNDERRUN_EN |
-	       S3C64XX_SPI_INT_TX_OVERRUN_EN | S3C64XX_SPI_INT_TX_UNDERRUN_EN,
-	       sdd->regs + S3C64XX_SPI_INT_EN);
+	if (1
+#ifdef ENABLE_SENSORS_FPRINT_SECURE
+	&& sdd->port_id != CONFIG_SENSORS_FP_SPI_NUMBER
+#endif
+#ifdef CONFIG_ESE_SECURE
+	&& sdd->port_id != CONFIG_ESE_SECURE_SPI_PORT
+#endif
+	){
+		writel(S3C64XX_SPI_INT_RX_OVERRUN_EN | S3C64XX_SPI_INT_RX_UNDERRUN_EN |
+			S3C64XX_SPI_INT_TX_OVERRUN_EN | S3C64XX_SPI_INT_TX_UNDERRUN_EN,
+			sdd->regs + S3C64XX_SPI_INT_EN);
+	}
 
 #ifdef CONFIG_PM_RUNTIME
 	pm_runtime_mark_last_busy(&pdev->dev);
@@ -1777,8 +1853,22 @@ static int s3c64xx_spi_suspend_operation(struct device *dev)
 		clk_disable_unprepare(sdd->clk);
 		exynos_update_ip_idle_status(sdd->idle_ip_index, 1);
 	}
+#else
+	while (sdd->clk->enable_count > 0)
+		clk_disable_unprepare(sdd->clk);
+	while (sdd->src_clk->enable_count > 0) {
+		clk_disable_unprepare(sdd->src_clk);
+		exynos_update_ip_idle_status(sdd->idle_ip_index, 1);
+	}
 #endif
 	sdd->cur_speed = 0; /* Output Clock is stopped */
+
+	if (sdd->port_id == 2) {
+		exynos_ss_printk("%s - SPI clock : %u(%lu)\n",
+			__func__, sdd->cur_speed, clk_get_rate(sdd->src_clk));
+		exynos_ss_printk("%s - SPI clock enable count: pclk %d, sclk %d\n",
+			__func__, sdd->clk->enable_count, sdd->src_clk->enable_count);
+	}
 
 	return 0;
 }
@@ -1790,11 +1880,25 @@ static int s3c64xx_spi_resume_operation(struct device *dev)
 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
 	int ret;
 
+	if (sdd->port_id == 2) {
+		exynos_ss_printk("%s - SPI clock : %u(%lu)\n",
+			__func__, sdd->cur_speed, clk_get_rate(sdd->src_clk));
+		exynos_ss_printk("%s - SPI clock enable count: pclk %d, sclk %d\n",
+			__func__, sdd->clk->enable_count, sdd->src_clk->enable_count);
+	}
+
 	if (sci->domain == DOMAIN_TOP) {
 		/* Enable the clock */
 		exynos_update_ip_idle_status(sdd->idle_ip_index, 0);
 		clk_prepare_enable(sdd->src_clk);
 		clk_prepare_enable(sdd->clk);
+
+		if (sdd->port_id == 2) {
+			exynos_ss_printk("%s - SPI clock : %u(%lu)\n",
+				__func__, sdd->cur_speed, clk_get_rate(sdd->src_clk));
+			exynos_ss_printk("%s - SPI clock enable count: pclk %d, sclk %d\n",
+				__func__, sdd->clk->enable_count, sdd->src_clk->enable_count);
+		}
 
 		if (sci->cfg_gpio)
 			sci->cfg_gpio();
@@ -1809,6 +1913,13 @@ static int s3c64xx_spi_resume_operation(struct device *dev)
 		clk_disable_unprepare(sdd->src_clk);
 		clk_disable_unprepare(sdd->clk);
 		exynos_update_ip_idle_status(sdd->idle_ip_index, 1);
+
+		if (sdd->port_id == 2) {
+			exynos_ss_printk("%s - SPI clock : %u(%lu)\n",
+				__func__, sdd->cur_speed, clk_get_rate(sdd->src_clk));
+			exynos_ss_printk("%s - SPI clock enable count: pclk %d, sclk %d\n",
+				__func__, sdd->clk->enable_count, sdd->src_clk->enable_count);
+		}
 #endif
 	}
 
@@ -1941,6 +2052,13 @@ static int s3c64xx_spi_runtime_suspend(struct device *dev)
 
 	s3c64xx_spi_pin_ctrl(dev, 0);
 
+	if (sdd->port_id == 2) {
+		exynos_ss_printk("%s - SPI clock : %u(%lu)\n",
+			__func__, sdd->cur_speed, clk_get_rate(sdd->src_clk));
+		exynos_ss_printk("%s - SPI clock enable count: pclk %d, sclk %d\n",
+			__func__, sdd->clk->enable_count, sdd->src_clk->enable_count);
+	}
+
 	return 0;
 }
 
@@ -1973,6 +2091,12 @@ static int s3c64xx_spi_runtime_resume(struct device *dev)
 		s3c64xx_spi_hwinit(sdd, sdd->port_id);
 	}
 #endif
+	if (sdd->port_id == 2) {
+		exynos_ss_printk("%s - SPI clock : %u(%lu)\n",
+			__func__, sdd->cur_speed, clk_get_rate(sdd->src_clk));
+		exynos_ss_printk("%s - SPI clock enable count: pclk %d, sclk %d\n",
+			__func__, sdd->clk->enable_count, sdd->src_clk->enable_count);
+	}
 
 	return 0;
 }

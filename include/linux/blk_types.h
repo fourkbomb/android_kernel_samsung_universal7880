@@ -85,7 +85,9 @@ struct bio {
 	};
 
 	unsigned short		bi_vcnt;	/* how many bio_vec's */
-
+#if defined(CONFIG_MMC_DW_FMP_DM_CRYPT) || defined(CONFIG_UFS_FMP_DM_CRYPT)
+	unsigned int		bi_sensitive_data;
+#endif
 	/*
 	 * Everything starting with bi_max_vecs will be preserved by bio_reset()
 	 */

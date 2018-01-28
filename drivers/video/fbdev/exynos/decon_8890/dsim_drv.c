@@ -45,12 +45,13 @@
 
 static DEFINE_MUTEX(dsim_rd_wr_mutex);
 static DECLARE_COMPLETION(dsim_ph_wr_comp);
+static DECLARE_COMPLETION(dsim_wr_comp);
 static DECLARE_COMPLETION(dsim_rd_comp);
 
 static int dsim_runtime_suspend(struct device *dev);
 static int dsim_runtime_resume(struct device *dev);
 
-#define MIPI_WR_TIMEOUT msecs_to_jiffies(33)
+#define MIPI_WR_TIMEOUT msecs_to_jiffies(100)
 #define MIPI_RD_TIMEOUT msecs_to_jiffies(100)
 
 #ifdef CONFIG_OF
@@ -67,19 +68,12 @@ EXPORT_SYMBOL(dsim0_for_decon);
 struct dsim_device *dsim1_for_decon;
 EXPORT_SYMBOL(dsim1_for_decon);
 
-static void __dsim_dump(struct dsim_device *dsim)
-{
-	print_hex_dump(KERN_ERR, "", DUMP_PREFIX_ADDRESS, 32, 4,
-			dsim->reg_base, 0xC0, false);
-}
-
 static void dsim_dump(struct dsim_device *dsim)
 {
 	dsim_info("=== DSIM SFR DUMP ===\n");
-	__dsim_dump(dsim);
 
-	/* Show panel status */
-	call_panel_ops(dsim, dump, dsim);
+	print_hex_dump(KERN_ERR, "", DUMP_PREFIX_ADDRESS, 32, 4,
+			dsim->reg_base, 0xC0, false);
 }
 
 static void dsim_long_data_wr(struct dsim_device *dsim, unsigned long data0, unsigned int data1)
@@ -132,70 +126,35 @@ static void dsim_long_data_wr(struct dsim_device *dsim, unsigned long data0, uns
 	}
 }
 
-static int dsim_wait_for_cmd_fifo_empty(struct dsim_device *dsim, bool must_wait)
+static int dsim_wait_for_cmd_fifo_empty(struct dsim_device *dsim, int id)
 {
-	int ret = 0;
-
-	if (!must_wait) {
-		/* timer is running, but already command is transferred */
-		if (dsim_reg_header_fifo_is_empty(dsim->id))
-			del_timer(&dsim->cmd_timer);
-
-		dsim_dbg("%s Doesn't need to wait fifo_completion\n", __func__);
-		return ret;
-	} else {
-		del_timer(&dsim->cmd_timer);
-		dsim_dbg("%s Waiting for fifo_completion...\n", __func__);
-	}
-
-	if (!wait_for_completion_timeout(&dsim_ph_wr_comp, MIPI_WR_TIMEOUT)) {
-		if (dsim_reg_header_fifo_is_empty(dsim->id)) {
-			reinit_completion(&dsim_ph_wr_comp);
-			dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
-			return 0;
+	switch (id) {
+	case 0: /* SFR_PH_FIFO */
+		if (!wait_for_completion_timeout(&dsim_ph_wr_comp,
+			MIPI_WR_TIMEOUT)) {
+			if (dsim_read_mask(dsim->id, DSIM_INTSRC, DSIM_INTSRC_SFR_PH_FIFO_EMPTY)) {
+				reinit_completion(&dsim_ph_wr_comp);
+				dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
+				return 0;
+			}
+			return -ETIMEDOUT;
 		}
-		ret = -ETIMEDOUT;
+		break;
+	case 1: /* SFR_PL_FIFO */
+		if (!wait_for_completion_timeout(&dsim_wr_comp,
+			MIPI_WR_TIMEOUT)) {
+			if (dsim_read_mask(dsim->id, DSIM_INTSRC, DSIM_INTSRC_SFR_PL_FIFO_EMPTY)) {
+				reinit_completion(&dsim_wr_comp);
+				dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PL_FIFO_EMPTY);
+				return 0;
+			}
+			return -ETIMEDOUT;
+		}
+		break;
+	default:
+		break;
 	}
-
-	if ((dsim->state == DSIM_STATE_HSCLKEN) && (ret == -ETIMEDOUT)) {
-		dev_err(dsim->dev, "%s have timed out\n", __func__);
-		__dsim_dump(dsim);
-		dsim_reg_set_fifo_ctrl(dsim->id, DSIM_FIFOCTRL_INIT_SFR);
-	}
-	return ret;
-}
-
-/* wait for until SFR fifo is empty */
-int dsim_wait_for_cmd_done(struct dsim_device *dsim)
-{
-	int ret = 0;
-	struct decon_device *decon = (struct decon_device *)dsim->decon;
-
-	decon_lpd_block_exit(decon);
-
-	mutex_lock(&dsim_rd_wr_mutex);
-	ret = dsim_wait_for_cmd_fifo_empty(dsim, true);
-	mutex_unlock(&dsim_rd_wr_mutex);
-
-	decon_lpd_unblock(decon);
-	return ret;
-}
-
-bool dsim_fifo_empty_needed(struct dsim_device *dsim, unsigned int data_id,
-	unsigned long data0)
-{
-	/* read case or partial update command */
-	if (data_id == MIPI_DSI_DCS_READ
-			|| data0 == MIPI_DCS_SET_PAGE_ADDRESS) {
-		dsim_dbg("%s: id:%d, data=%ld\n", __func__, data_id, data0);
-		return true;
-	}
-
-	/* Check a FIFO level whether writable or not */
-	if (!dsim_reg_is_writable_fifo_state(dsim->id))
-		return true;
-
-	return false;
+	return 0;
 }
 
 int dsim_write_data(struct dsim_device *dsim, unsigned int data_id,
@@ -203,7 +162,6 @@ int dsim_write_data(struct dsim_device *dsim, unsigned int data_id,
 {
 	int ret = 0;
 	struct decon_device *decon = (struct decon_device *)dsim->decon;
-	bool must_wait = true;
 
 	/* LPD related: Decon must be enabled for PACKET_GO mode */
 	decon_lpd_block_exit(decon);
@@ -216,12 +174,6 @@ int dsim_write_data(struct dsim_device *dsim, unsigned int data_id,
 	}
 	DISP_SS_EVENT_LOG_CMD(&dsim->sd, data_id, data0);
 
-	reinit_completion(&dsim_ph_wr_comp);
-	dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
-
-	/* Run write-fail dectector */
-	mod_timer(&dsim->cmd_timer, jiffies + MIPI_WR_TIMEOUT);
-
 	switch (data_id) {
 	/* short packet types of packet types for command. */
 	case MIPI_DSI_GENERIC_SHORT_WRITE_0_PARAM:
@@ -230,37 +182,127 @@ int dsim_write_data(struct dsim_device *dsim, unsigned int data_id,
 	case MIPI_DSI_DCS_SHORT_WRITE:
 	case MIPI_DSI_DCS_SHORT_WRITE_PARAM:
 	case MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE:
-	case MIPI_DSI_DSC_PRA:
-	case MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM:
-	case MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM:
-	case MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM:
-	case MIPI_DSI_DCS_READ:
+		reinit_completion(&dsim_ph_wr_comp);
+		dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
+		dsim_reg_wr_tx_header(dsim->id, data_id, data0, data1);
+		if (dsim_wait_for_cmd_fifo_empty(dsim, 0)) {
+			dev_err(dsim->dev, "ID:%d : MIPI DSIM short packet write Timeout! 0x%lx\n",
+						data_id, data0);
+			ret = -ETIMEDOUT;
+			goto exit;
+		}
+		break;
+
+	/* general command */
 	case MIPI_DSI_COLOR_MODE_OFF:
 	case MIPI_DSI_COLOR_MODE_ON:
 	case MIPI_DSI_SHUTDOWN_PERIPHERAL:
 	case MIPI_DSI_TURN_ON_PERIPHERAL:
+		reinit_completion(&dsim_ph_wr_comp);
+		dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
 		dsim_reg_wr_tx_header(dsim->id, data_id, data0, data1);
-		must_wait = dsim_fifo_empty_needed(dsim, data_id, data0);
+		if (dsim_wait_for_cmd_fifo_empty(dsim, 0)) {
+			dev_err(dsim->dev, "ID: %d : MIPI DSIM short packet write Timeout! 0x%lx\n",
+						data_id, data0);
+			ret = -ETIMEDOUT;
+			goto exit;
+		}
 		break;
 
-	/* long packet types of packet types for command. */
+	/* packet types for video data */
+	case MIPI_DSI_V_SYNC_START:
+	case MIPI_DSI_V_SYNC_END:
+	case MIPI_DSI_H_SYNC_START:
+	case MIPI_DSI_H_SYNC_END:
+	case MIPI_DSI_END_OF_TRANSMISSION:
+		break;
+
+	/* short and response packet types for command */
+	case MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM:
+	case MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM:
+	case MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM:
+	case MIPI_DSI_DCS_READ:
+		reinit_completion(&dsim_ph_wr_comp);
+		dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
+		dsim_reg_wr_tx_header(dsim->id, data_id, data0, data1);
+		if (dsim_wait_for_cmd_fifo_empty(dsim, 0)) {
+			dev_err(dsim->dev, "ID: %d : MIPI DSIM short packet write Timeout! 0x%lx\n",
+						data_id, data0);
+			ret = -ETIMEDOUT;
+			goto exit;
+		}
+		break;
+
+	/* long packet type and null packet */
+	case MIPI_DSI_NULL_PACKET:
+	case MIPI_DSI_BLANKING_PACKET:
+		break;
+
 	case MIPI_DSI_GENERIC_LONG_WRITE:
 	case MIPI_DSI_DCS_LONG_WRITE:
-	case MIPI_DSI_DSC_PPS:
-		dsim_long_data_wr(dsim, data0, data1);
-		dsim_reg_wr_tx_header(dsim->id, data_id, data1 & 0xff, (data1 & 0xff00) >> 8);
-		must_wait = dsim_fifo_empty_needed(dsim, data_id, *(u8 *)data0);
-		break;
+	{
+		unsigned int size;
 
-	default:
-		dev_warn(dsim->dev, "data id %x is not supported current LSI spec.\n", data_id);
-		ret = -EINVAL;
+		size = data1 * 4;
+		reinit_completion(&dsim_wr_comp);
+		reinit_completion(&dsim_ph_wr_comp);
+		dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PL_FIFO_EMPTY |
+						DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
+		/* if data count is less then 4, then send 3bytes data.  */
+		if (data1 < 4) {
+			unsigned int payload = 0;
+			payload = *(u8 *)(data0) |
+				*(u8 *)(data0 + 1) << 8 |
+				*(u8 *)(data0 + 2) << 16;
+
+			dsim_reg_wr_tx_payload(dsim->id, payload);
+
+			dev_dbg(dsim->dev, "count = %d payload = %x,%x %x %x\n",
+				data1, payload,
+				*(u8 *)(data0),
+				*(u8 *)(data0 + 1),
+				*(u8 *)(data0 + 2));
+		/* in case that data count is more then 4 */
+		} else
+			dsim_long_data_wr(dsim, data0, data1);
+
+		/* put data into header fifo */
+		dsim_reg_wr_tx_header(dsim->id, data_id, data1 & 0xff, (data1 & 0xff00) >> 8);
+		if (dsim_wait_for_cmd_fifo_empty(dsim, 1)) {
+			dev_err(dsim->dev, "ID: %d : MIPI DSIM write Timeout!  0x%0lx\n",
+						data_id, data0);
+			ret = -ETIMEDOUT;
+			goto exit;
+		}
+		if (dsim_wait_for_cmd_fifo_empty(dsim, 0)) {
+			dev_err(dsim->dev, "ID: %d : MIPI DSIM short packet write Timeout! 0x%lx\n",
+						data_id, data0);
+			ret = -ETIMEDOUT;
+			goto exit;
+		}
+		break;
 	}
 
-	ret = dsim_wait_for_cmd_fifo_empty(dsim, must_wait);
-	if (ret < 0) {
-		dev_err(dsim->dev, "ID: %d : MIPI DSIM command write Timeout! 0x%lx\n",
-				data_id, data0);
+	/* packet typo for video data */
+	case MIPI_DSI_PACKED_PIXEL_STREAM_16:
+	case MIPI_DSI_PACKED_PIXEL_STREAM_18:
+	case MIPI_DSI_PIXEL_STREAM_3BYTE_18:
+	case MIPI_DSI_PACKED_PIXEL_STREAM_24:
+		break;
+	default:
+		dev_warn(dsim->dev, "data id %x is not supported current DSI spec.\n", data_id);
+		ret = -EINVAL;
+		goto exit;
+	}
+
+exit:
+	if ((dsim->state == DSIM_STATE_HSCLKEN) && (ret == -ETIMEDOUT)) {
+		dev_err(dsim->dev, "0x%08X, 0x%08X, 0x%08X, 0x%08X\n",
+				readl(dsim->reg_base + DSIM_DPHY_STATUS),
+				readl(dsim->reg_base + DSIM_INTSRC),
+				readl(dsim->reg_base + DSIM_FIFOCTRL),
+				readl(dsim->reg_base + DSIM_CMD_CONFIG));
+		dsim_reg_set_fifo_ctrl(dsim->id, DSIM_FIFOCTRL_INIT_SFR);
 	}
 
 err_exit:
@@ -278,8 +320,6 @@ static int dsim_partial_area_command(struct dsim_device *dsim, void *arg)
 	char data_2b[5];
 	int retry;
 
-	dsim_dbg("%s: (%d, %d, %d,%d)\n", __func__,
-			win_rect->x, win_rect->y, win_rect->w, win_rect->h);
 	/* w is right & h is bottom */
 	data_2a[0] = MIPI_DCS_SET_COLUMN_ADDRESS;
 	data_2a[1] = (win_rect->x >> 8) & 0xff;
@@ -334,13 +374,48 @@ static void dsim_set_lcd_full_screen(struct dsim_device *dsim)
 }
 #endif
 
+static void dsim_rx_err_handler(struct dsim_device *dsim,
+	u32 rx_fifo)
+{
+	/* Parse error report bit*/
+	if (rx_fifo & (1 << 8))
+		dev_err(dsim->dev, "SoT error!\n");
+	if (rx_fifo & (1 << 9))
+		dev_err(dsim->dev, "SoT sync error!\n");
+	if (rx_fifo & (1 << 10))
+		dev_err(dsim->dev, "EoT error!\n");
+	if (rx_fifo & (1 << 11))
+		dev_err(dsim->dev, "Escape mode entry command error!\n");
+	if (rx_fifo & (1 << 12))
+		dev_err(dsim->dev, "Low-power transmit sync error!\n");
+	if (rx_fifo & (1 << 13))
+		dev_err(dsim->dev, "HS receive timeout error!\n");
+	if (rx_fifo & (1 << 14))
+		dev_err(dsim->dev, "False control error!\n");
+	/* Bit 15 is reserved*/
+	if (rx_fifo & (1 << 16))
+		dev_err(dsim->dev, "ECC error, single-bit(detected and corrected)!\n");
+	if (rx_fifo & (1 << 17))
+		dev_err(dsim->dev, "ECC error, multi-bit(detected, not corrected)!\n");
+	if (rx_fifo & (1 << 18))
+		dev_err(dsim->dev, "Checksum error(long packet only)!\n");
+	if (rx_fifo & (1 << 19))
+		dev_err(dsim->dev, "DSI data type not recognized!\n");
+	if (rx_fifo & (1 << 20))
+		dev_err(dsim->dev, "DSI VC ID invalid!\n");
+	if (rx_fifo & (1 << 21))
+		dev_err(dsim->dev, "Invalid transmission length!\n");
+	/* Bit 22 is reserved */
+	if (rx_fifo & (1 << 23))
+		dev_err(dsim->dev, "DSI protocol violation!\n");
+}
+
 int dsim_read_data(struct dsim_device *dsim, u32 data_id,
 	 u32 addr, u32 count, u8 *buf)
 {
 	u32 rx_fifo, rx_size = 0;
 	int i, j, ret = 0;
 	struct decon_device *decon = (struct decon_device *)dsim->decon;
-	u32 rx_fifo_depth = DSIM_RX_FIFO_MAX_DEPTH;
 
 	/* LPD related: Decon must be enabled for PACKET_GO mode */
 	decon_lpd_block_exit(decon);
@@ -353,9 +428,8 @@ int dsim_read_data(struct dsim_device *dsim, u32 data_id,
 
 	reinit_completion(&dsim_rd_comp);
 
-	/* Init RX FIFO before read and clear DSIM_INTSRC */
+	/* Init RX FIFO before read */
 	dsim_reg_set_fifo_ctrl(dsim->id, DSIM_FIFOCTRL_INIT_RX);
-	dsim_reg_clear_int(dsim->id, DSIM_INTSRC_RX_DATA_DONE);
 
 	/* Set the maximum packet size returned */
 	dsim_write_data(dsim,
@@ -363,7 +437,8 @@ int dsim_read_data(struct dsim_device *dsim, u32 data_id,
 
 	/* Read request */
 	dsim_write_data(dsim, data_id, addr, 0);
-	if (!wait_for_completion_timeout(&dsim_rd_comp, MIPI_RD_TIMEOUT)) {
+	if (!wait_for_completion_timeout(&dsim_rd_comp,
+		MIPI_RD_TIMEOUT)) {
 		dev_err(dsim->dev, "MIPI DSIM read Timeout!\n");
 		return -ETIMEDOUT;
 	}
@@ -371,61 +446,58 @@ int dsim_read_data(struct dsim_device *dsim, u32 data_id,
 	mutex_lock(&dsim_rd_wr_mutex);
 	DISP_SS_EVENT_LOG_CMD(&dsim->sd, data_id, (char)addr);
 
-	do {
-		rx_fifo = dsim_reg_get_rx_fifo(dsim->id);
+	rx_fifo = readl(dsim->reg_base + DSIM_RXFIFO);
 
-		/* Parse the RX packet data types */
-		switch (rx_fifo & 0xff) {
-		case MIPI_DSI_RX_ACKNOWLEDGE_AND_ERROR_REPORT:
-			ret = dsim_reg_rx_err_handler(dsim->id, rx_fifo);
-			if (ret < 0) {
-				__dsim_dump(dsim);
-				goto exit;
-			}
-			break;
-		case MIPI_DSI_RX_END_OF_TRANSMISSION:
-			dev_dbg(dsim->dev, "EoTp was received from LCD module.\n");
-			break;
-		case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_1BYTE:
-		case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_2BYTE:
-		case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_1BYTE:
-		case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_2BYTE:
-			dev_dbg(dsim->dev, "Short Packet was received from LCD module.\n");
-			for (i = 0; i <= count; i++)
-				buf[i] = (rx_fifo >> (8 + i * 8)) & 0xff;
-			break;
-		case MIPI_DSI_RX_DCS_LONG_READ_RESPONSE:
-		case MIPI_DSI_RX_GENERIC_LONG_READ_RESPONSE:
-			dev_dbg(dsim->dev, "Long Packet was received from LCD module.\n");
-			rx_size = (rx_fifo & 0x00ffff00) >> 8;
-			dev_dbg(dsim->dev, "rx fifo : %8x, response : %x, rx_size : %d\n",
-					rx_fifo, rx_fifo & 0xff, rx_size);
-			/* Read data from RX packet payload */
-			for (i = 0; i < rx_size >> 2; i++) {
-				rx_fifo = dsim_reg_get_rx_fifo(dsim->id);
-				for (j = 0; j < 4; j++)
-					buf[(i*4)+j] = (u8)(rx_fifo >> (j * 8)) & 0xff;
-			}
-			if (rx_size % 4) {
-				rx_fifo = dsim_reg_get_rx_fifo(dsim->id);
-				for (j = 0; j < rx_size % 4; j++)
-					buf[4 * i + j] =
-						(u8)(rx_fifo >> (j * 8)) & 0xff;
-			}
-			break;
-		default:
-			dev_err(dsim->dev, "Packet format is invaild.\n");
-			ret = -EBUSY;
-			break;
+	/* Parse the RX packet data types */
+	switch (rx_fifo & 0xff) {
+	case MIPI_DSI_RX_ACKNOWLEDGE_AND_ERROR_REPORT:
+		dsim_rx_err_handler(dsim, rx_fifo);
+	case MIPI_DSI_RX_END_OF_TRANSMISSION:
+		dev_dbg(dsim->dev, "EoTp was received from LCD module.\n");
+		break;
+	case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_1BYTE:
+	case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_2BYTE:
+	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_1BYTE:
+	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_2BYTE:
+		dev_dbg(dsim->dev, "Short Packet was received from LCD module.\n");
+		for (i = 0; i <= count; i++)
+			buf[i] = (rx_fifo >> (8 + i * 8)) & 0xff;
+		break;
+	case MIPI_DSI_RX_DCS_LONG_READ_RESPONSE:
+	case MIPI_DSI_RX_GENERIC_LONG_READ_RESPONSE:
+		dev_dbg(dsim->dev, "Long Packet was received from LCD module.\n");
+		rx_size = (rx_fifo & 0x00ffff00) >> 8;
+		dev_dbg(dsim->dev, "rx fifo : %8x, response : %x, rx_size : %d\n",
+				rx_fifo, rx_fifo & 0xff, rx_size);
+		/* Read data from RX packet payload */
+		for (i = 0; i < rx_size >> 2; i++) {
+			rx_fifo = readl(dsim->reg_base + DSIM_RXFIFO);
+			for (j = 0; j < 4; j++)
+				buf[(i*4)+j] = (u8)(rx_fifo >> (j * 8)) & 0xff;
 		}
-	} while (!dsim_reg_rx_fifo_is_empty(dsim->id) && --rx_fifo_depth);
-
-	ret = rx_size;
-	if (!rx_fifo_depth) {
-		dev_err(dsim->dev, "Check DPHY values about HS clk.\n");
-		__dsim_dump(dsim);
-		ret = -EBUSY;
+		if (rx_size % 4) {
+			rx_fifo = readl(dsim->reg_base + DSIM_RXFIFO);
+			for (j = 0; j < rx_size % 4; j++)
+				buf[4 * i + j] =
+					(u8)(rx_fifo >> (j * 8)) & 0xff;
+		}
+		break;
+	default:
+		dev_err(dsim->dev, "Packet format is invaild.\n");
+		goto rx_error;
 	}
+
+	rx_fifo = readl(dsim->reg_base + DSIM_RXFIFO);
+	ret = rx_size;
+	goto exit;
+
+rx_error:
+	dsim_reg_force_dphy_stop_state(dsim->id, 1);
+	usleep_range(3000, 4000);
+	dsim_reg_force_dphy_stop_state(dsim->id, 0);
+	ret = -EPERM;
+	goto exit;
+
 exit:
 	mutex_unlock(&dsim_rd_wr_mutex);
 	decon_lpd_unblock(decon);
@@ -475,34 +547,38 @@ end:
 
 #endif
 
-void dsim_cmd_fail_detector(unsigned long arg)
+static void dsim_write_test(struct dsim_device *dsim)
 {
-	struct dsim_device *dsim = (struct dsim_device *)arg;
-	struct decon_device *decon = (struct decon_device *)dsim->decon;
+	int ret = 0, re_try = 4, i = 0;
+	u32 test_data[2] = {0xaa, 0xaa};
 
-	dsim_dbg("%s +\n", __func__);
-	decon_lpd_block(decon);
-	if (dsim->state != DSIM_STATE_HSCLKEN) {
-		dev_err(dsim->dev, "%s: DSIM is not ready. state(%d)\n",
-				__func__, dsim->state);
-		goto exit;
+	for (i = 0; i < re_try; i++) {
+		ret = dsim_write_data(dsim, MIPI_DSI_GENERIC_SHORT_WRITE_2_PARAM,
+				test_data[0], test_data[1]);
+		if (ret < 0)
+			dsim_dbg("%s: Failed to write test data!\n",
+				(dsim->pktgo == DSIM_PKTGO_ENABLED) ? "PKT-GO mode" : "Non PKT-GO mode");
+		else
+			dsim_dbg("%s: Succeeded to write test data!\n",
+				(dsim->pktgo == DSIM_PKTGO_ENABLED) ? "PKT-GO mode" : "Non PKT-GO mode");
 	}
+}
 
-	/* If already FIFO empty even though the timer is no pending */
-	if (!timer_pending(&dsim->cmd_timer)
-			&& dsim_reg_header_fifo_is_empty(dsim->id)) {
-		reinit_completion(&dsim_ph_wr_comp);
-		dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
-		goto exit;
-	}
+static void dsim_read_test(struct dsim_device *dsim)
+{
+	int ret = 0;
+	int count = 3;
+	u8 buf[4];
+	u32 rd_addr = 0x04;
 
-	dev_err(dsim->dev, "FIFO empty irq hasn't been occured\n");
-	__dsim_dump(dsim);
+	ret = dsim_read_data(dsim, MIPI_DSI_DCS_READ, rd_addr, count, buf);
 
-exit:
-	decon_lpd_unblock(decon);
-	dsim_dbg("%s -\n", __func__);
-	return;
+	if (ret < 0)
+		dsim_dbg("%s: Failed to read test data!\n",
+				(dsim->pktgo == DSIM_PKTGO_ENABLED) ? "PKT-GO mode" : "Non PKT-GO mode");
+	else
+		dsim_dbg("%s: Succeeded to read test data! test data[0] = %#x, test data[1] = %#x, test data[2] = %#x\n",
+				((dsim->pktgo == DSIM_PKTGO_ENABLED) ? "PKT-GO mode" : "Non PKT-GO mode"), buf[0], buf[1], buf[3]);
 }
 
 static irqreturn_t dsim_interrupt_handler(int irq, void *dev_id)
@@ -523,15 +599,14 @@ static irqreturn_t dsim_interrupt_handler(int irq, void *dev_id)
 	int_src = readl(dsim->reg_base + DSIM_INTSRC);
 
 	/* Test bit */
-	if (int_src & DSIM_INTSRC_SFR_PH_FIFO_EMPTY) {
-		del_timer(&dsim->cmd_timer);
+	if (int_src & DSIM_INTSRC_SFR_PL_FIFO_EMPTY)
+		complete(&dsim_wr_comp);
+	if (int_src & DSIM_INTSRC_SFR_PH_FIFO_EMPTY)
 		complete(&dsim_ph_wr_comp);
-	}
 	if (int_src & DSIM_INTSRC_RX_DATA_DONE)
 		complete(&dsim_rd_comp);
 	if (int_src & DSIM_INTSRC_FRAME_DONE)
-		/* TODO: This will be added in the future. event log should consider dual DSI
-		 * DISP_SS_EVENT_LOG(DISP_EVT_DSIM_FRAMEDONE, &dsim->sd, ktime_set(0, 0)); */
+		DISP_SS_EVENT_LOG(DISP_EVT_DSIM_FRAMEDONE, &dsim->sd, ktime_set(0, 0));
 	if (int_src & DSIM_INTSRC_ERR_RX_ECC)
 		dev_err(dsim->dev, "RX ECC Multibit error was detected!\n");
 	dsim_reg_clear_int(dsim->id, int_src);
@@ -710,10 +785,10 @@ static int dsim_enable(struct dsim_device *dsim)
 #else
 	dsim_runtime_resume(dsim->dev);
 #endif
-	enable_irq(dsim->irq);
 
 	/* Panel power on */
 	dsim_set_panel_power(dsim, 1);
+	dsim_reset_panel(dsim);
 
 	call_panel_ops(dsim, resume, dsim);
 
@@ -722,9 +797,6 @@ static int dsim_enable(struct dsim_device *dsim)
 
 	dsim_reg_set_clocks(dsim->id, &dsim->clks_param.clks, &dsim->lcd_info.dphy_pms, 1);
 	dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 1);
-
-	/* Panel reset should be set after LP-11 */
-	dsim_reset_panel(dsim);
 	dsim_reg_init(dsim->id, &dsim->lcd_info, dsim->data_lane_cnt,
 			&dsim->clks_param.clks);
 
@@ -750,12 +822,10 @@ static int dsim_disable(struct dsim_device *dsim)
 
 	/* Wait for current read & write CMDs. */
 	mutex_lock(&dsim_rd_wr_mutex);
-	del_timer(&dsim->cmd_timer);
 	dsim->state = DSIM_STATE_SUSPEND;
 	mutex_unlock(&dsim_rd_wr_mutex);
 
 	dsim_reg_stop(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane);
-	disable_irq(dsim->irq);
 
 	phy_power_off(dsim->phy);
 	dsim_set_panel_power(dsim, 0);
@@ -924,6 +994,8 @@ static long dsim_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 #endif
 	case DSIM_IOC_DUMP:
 		dsim_dump(dsim);
+		/* Show panel status */
+		call_panel_ops(dsim, dump, dsim);
 		break;
 	default:
 		dev_err(dsim->dev, "unsupported ioctl");
@@ -1006,49 +1078,13 @@ static int dsim_register_entity(struct dsim_device *dsim)
 	return 0;
 }
 
-static int dsim_cmd_sysfs_write(struct dsim_device *dsim, bool on)
-{
-	int ret = 0;
-
-	if ( on )
-		ret = dsim_write_data(dsim, MIPI_DSI_DCS_SHORT_WRITE,
-			MIPI_DCS_SET_DISPLAY_ON, 0);
-	else
-		ret = dsim_write_data(dsim, MIPI_DSI_DCS_SHORT_WRITE,
-			MIPI_DCS_SET_DISPLAY_OFF, 0);
-	if (ret < 0)
-		dsim_err("Failed to write test data!\n");
-	else
-		dsim_dbg("Succeeded to write test data!\n");
-
-	return ret;
-}
-
-static int dsim_cmd_sysfs_read(struct dsim_device *dsim)
-{
-	int ret = 0;
-	unsigned int id;
-	u8 buf[4];
-
-	/* dsim sends the request for the lcd id and gets it buffer */
-	ret = dsim_read_data(dsim, MIPI_DSI_DCS_READ,
-		MIPI_DCS_GET_DISPLAY_ID, DSIM_DDI_ID_LEN, buf);
-	id = *(unsigned int *)buf;
-	if (ret < 0)
-		dsim_err("Failed to read panel id!\n");
-	else
-		dsim_info("Suceeded to read panel id : 0x%08x\n", id);
-
-	return ret;
-}
-
-static ssize_t dsim_cmd_sysfs_show(struct device *dev,
+static ssize_t dsim_rw_test_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	return 0;
 }
 
-static ssize_t dsim_cmd_sysfs_store(struct device *dev,
+static ssize_t decon_rw_test_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	int ret;
@@ -1060,41 +1096,27 @@ static ssize_t dsim_cmd_sysfs_store(struct device *dev,
 	if (ret)
 		return ret;
 
-	switch (cmd) {
-	case 1:
-		ret = dsim_cmd_sysfs_read(dsim);
-		call_panel_ops(dsim, dump, dsim);
-		if (ret)
-			return ret;
-		break;
-	case 2:
-		ret = dsim_cmd_sysfs_write(dsim, true);
-		dsim_info("Dsim write command, display on!!\n");
-		if (ret)
-			return ret;
-		break;
-	case 3:
-		ret = dsim_cmd_sysfs_write(dsim, false);
-		dsim_info("Dsim write command, display off!!\n");
-		if (ret)
-			return ret;
-		break;
-	default :
-		dsim_info("unsupportable command\n");
-		break;
+	ret = -ENXIO;
+
+	if (cmd == 0x1) {
+		dsim_info("Dsim is trying to do write test\n");
+		dsim_write_test(dsim);
+	} else {
+		dsim_info("Dsim is trying to do read test\n");
+		dsim_read_test(dsim);
 	}
 
-	return count;
+	return ret;
 }
-static DEVICE_ATTR(cmd_rw, 0644, dsim_cmd_sysfs_show, dsim_cmd_sysfs_store);
+static DEVICE_ATTR(rw_test, 0644, dsim_rw_test_show, decon_rw_test_store);
 
-int dsim_create_cmd_rw_sysfs(struct dsim_device *dsim)
+int dsim_create_rw_test_sysfs(struct dsim_device *dsim)
 {
 	int ret = 0;
 
-	ret = device_create_file(dsim->dev, &dev_attr_cmd_rw);
+	ret = device_create_file(dsim->dev, &dev_attr_rw_test);
 	if (ret)
-		dsim_err("failed to create command read & write sysfs\n");
+		dsim_err("failed to create read & write test sysfs\n");
 
 	return ret;
 }
@@ -1170,16 +1192,6 @@ static int dsim_parse_lcd_info(struct dsim_device *dsim)
 
 	of_property_read_u32(node, "type_of_ddi", &dsim->lcd_info.ddi_type);
 	dsim_dbg("ddi type(%d)\n", dsim->lcd_info.ddi_type);
-
-	of_property_read_u32(node, "dsc_en", &dsim->lcd_info.dsc_enabled);
-	dsim_info("dsc is %s\n", dsim->lcd_info.dsc_enabled ? "enabled" : "disabled");
-
-	if (dsim->lcd_info.dsc_enabled) {
-		of_property_read_u32(node, "dsc_cnt", &dsim->lcd_info.dsc_cnt);
-		dsim_info("dsc count(%d)\n", dsim->lcd_info.dsc_cnt);
-		of_property_read_u32(node, "dsc_slice_num", &dsim->lcd_info.dsc_slice_num);
-		dsim_info("dsc slice count(%d)\n", dsim->lcd_info.dsc_slice_num);
-	}
 
 	return 0;
 }
@@ -1264,18 +1276,12 @@ static int dsim_probe(struct platform_device *pdev)
 	dsim->panel_ops = &s6e3hf2_wqhd_mipi_lcd_driver;
 #elif IS_ENABLED(CONFIG_EXYNOS_DECON_LCD_S6E3FA0)
 	dsim->panel_ops = &s6e3fa0_mipi_lcd_driver;
-#elif IS_ENABLED(CONFIG_EXYNOS_DECON_LCD_S6E3HA3)
-	dsim->panel_ops = &s6e3ha3_mipi_lcd_driver;
-#elif IS_ENABLED(CONFIG_EXYNOS_DECON_LCD_S6E3HF4)
-	dsim->panel_ops = &s6e3hf4_mipi_lcd_driver;
 #else
 	dsim->panel_ops = &s6e3ha0_mipi_lcd_driver;
 #endif
 
 	dsim->timing.bps = 0;
 
-	setup_timer(&dsim->cmd_timer, dsim_cmd_fail_detector,
-			(unsigned long)dsim);
 	mutex_init(&dsim_rd_wr_mutex);
 
 	pm_runtime_enable(dev);
@@ -1332,11 +1338,11 @@ dsim_init_done:
 
 	call_panel_ops(dsim, probe, dsim);
 	/* TODO: displayon is moved to decon probe only in case of lcd on probe */
-	/* call_panel_ops(dsim, displayon, dsim); */
+	/* dsim->panel_ops->displayon(dsim); */
 
 	dsim_clocks_info(dsim);
 
-	dsim_create_cmd_rw_sysfs(dsim);
+	dsim_create_rw_test_sysfs(dsim);
 
 	dev_info(dev, "mipi-dsi driver(%s mode) has been probed.\n",
 		dsim->lcd_info.mode == DECON_MIPI_COMMAND_MODE ? "CMD" : "VIDEO");

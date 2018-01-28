@@ -19,9 +19,9 @@
 #include <linux/sys_soc.h>
 #include <linux/soc/samsung/exynos-soc.h>
 
-#define EXYNOS_SUBREV_MASK	(0xF << 4)
-#define EXYNOS_MAINREV_MASK	(0xF << 0)
-#define EXYNOS_REV_MASK		(EXYNOS_SUBREV_MASK | EXYNOS_MAINREV_MASK)
+#define EXYNOS_MAINREV_MASK	(0xF << 4)
+#define EXYNOS_SUBREV_MASK	(0xF << 0)
+#define EXYNOS_REV_MASK		(EXYNOS_MAINREV_MASK | EXYNOS_SUBREV_MASK)
 
 static void __iomem *exynos_chipid_base;
 
@@ -63,6 +63,12 @@ static const char * __init product_id_to_name(unsigned int product_id)
 		break;
 	case EXYNOS5800_SOC_ID:
 		soc_name = "EXYNOS5800";
+		break;
+	case EXYNOS7870_SOC_ID:
+		soc_name = "EXYNOS7870";
+		break;
+	case EXYNOS7880_SOC_ID:
+		soc_name = "EXYNOS7880";
 		break;
 	case EXYNOS8890_SOC_ID:
 		soc_name = "EXYNOS8890";
@@ -107,9 +113,14 @@ void __init exynos_chipid_early_init(struct device *dev)
 		panic("%s: failed to map registers\n", __func__);
 
 	exynos_soc_info.product_id  = __raw_readl(exynos_chipid_base);
+	exynos_soc_info.lot_id = __raw_readl(exynos_chipid_base + UNIQUE_ID1) & EXYNOS_LOTID_MASK;
 	exynos_soc_info.unique_id  = __raw_readl(exynos_chipid_base + UNIQUE_ID1);
 	exynos_soc_info.unique_id  |= (u64)__raw_readl(exynos_chipid_base + UNIQUE_ID2) << 32;
 	exynos_soc_info.revision = exynos_soc_info.product_id & EXYNOS_REV_MASK;
+
+	// exceptional case for 7880
+	if ((exynos_soc_info.product_id & EXYNOS_SOC_MASK) == EXYNOS7880_SOC_ID)
+		exynos_soc_info.revision -= 1;
 }
 
 static int __init exynos_chipid_probe(struct platform_device *pdev)
@@ -170,4 +181,84 @@ static int __init exynos_chipid_init(void)
 	return platform_driver_register(&exynos_chipid_driver);
 }
 core_initcall(exynos_chipid_init);
+
+/*
+ *  sysfs implementation for exynos-snapshot
+ *  you can access the sysfs of exynos-snapshot to /sys/devices/system/chip-id
+ *  path.
+ */
+static struct bus_type chipid_subsys = {
+	.name = "chip-id",
+	.dev_name = "chip-id",
+};
+
+static ssize_t chipid_product_id_show(struct kobject *kobj,
+			         struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, 10, "%08X\n", exynos_soc_info.product_id);
+}
+
+static ssize_t chipid_lot_id_show(struct kobject *kobj,
+			         struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, 14, "%08X\n", exynos_soc_info.lot_id);
+}
+
+static ssize_t chipid_revision_show(struct kobject *kobj,
+			         struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, 14, "%08X\n", exynos_soc_info.revision);
+}
+
+static ssize_t chipid_evt_ver_show(struct kobject *kobj,
+			         struct kobj_attribute *attr, char *buf)
+{
+	if (exynos_soc_info.revision == 0)
+		return snprintf(buf, 14, "EVT0\n");
+	else
+		return snprintf(buf, 14, "EVT%1X.%1X\n",
+				(exynos_soc_info.revision & EXYNOS_MAINREV_MASK) >> 4,
+				(exynos_soc_info.revision & EXYNOS_SUBREV_MASK));
+}
+
+static struct kobj_attribute chipid_product_id_attr =
+        __ATTR(product_id, 0644, chipid_product_id_show, NULL);
+
+static struct kobj_attribute chipid_lot_id_attr =
+        __ATTR(lot_id, 0644, chipid_lot_id_show, NULL);
+
+static struct kobj_attribute chipid_revision_attr =
+        __ATTR(revision, 0644, chipid_revision_show, NULL);
+
+static struct kobj_attribute chipid_evt_ver_attr =
+        __ATTR(evt_ver, 0644, chipid_evt_ver_show, NULL);
+
+static struct attribute *chipid_sysfs_attrs[] = {
+	&chipid_product_id_attr.attr,
+	&chipid_lot_id_attr.attr,
+	&chipid_revision_attr.attr,
+	&chipid_evt_ver_attr.attr,
+	NULL,
+};
+
+static struct attribute_group chipid_sysfs_group = {
+	.attrs = chipid_sysfs_attrs,
+};
+
+static const struct attribute_group *chipid_sysfs_groups[] = {
+	&chipid_sysfs_group,
+	NULL,
+};
+
+static int __init chipid_sysfs_init(void)
+{
+	int ret = 0;
+
+	ret = subsys_system_register(&chipid_subsys, chipid_sysfs_groups);
+	if (ret)
+		pr_err("fail to register exynos-snapshop subsys\n");
+
+	return ret;
+}
+late_initcall(chipid_sysfs_init);
 

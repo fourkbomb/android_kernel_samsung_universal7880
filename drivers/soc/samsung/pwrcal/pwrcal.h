@@ -34,7 +34,6 @@ extern unsigned long cal_dfs_get_rate(unsigned int id);
 extern int cal_dfs_get_rate_table(unsigned int id, unsigned long *table);
 extern int cal_dfs_get_asv_table(unsigned int id, unsigned int *table);
 extern unsigned int cal_asv_pmic_info(void);
-extern int cal_asv_get_ids_info(unsigned int domain);
 
 
 struct dvfs_rate_volt {
@@ -63,8 +62,6 @@ enum cal_dfs_ext_ops {
 	cal_dfs_cpu_idle_clock_down = 60,
 
 	cal_dfs_ctrl_clk_gate	= 70,
-
-	cal_dfs_rate_lock = 80,
 };
 
 extern int cal_dfs_ext_ctrl(unsigned int id,

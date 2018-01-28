@@ -41,8 +41,7 @@
 #define MFC_ENC_AVG_FPS_MODE
 
 #define ENC_HIGH_FPS	(70000)
-#define ENC_DEFAULT_FPS	(30000)
-#define ENC_MAX_FPS	(120000)
+#define ENC_MAX_FPS	(240000)
 #define ENC_AVG_FRAMES	(10)
 
 static struct s5p_mfc_fmt *find_format(struct v4l2_format *f, unsigned int t)
@@ -98,11 +97,6 @@ static int check_ctrl_val(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 	}
 	if (!FW_HAS_ENC_SPSPPS_CTRL(dev) && ctrl->id ==	\
 			V4L2_CID_MPEG_VIDEO_H264_PREPEND_SPSPPS_TO_IDR) {
-		mfc_err_ctx("Not support feature(0x%x) for F/W\n", ctrl->id);
-		return -ERANGE;
-	}
-	if (!FW_HAS_ROI_CONTROL(dev) && ctrl->id == \
-			V4L2_CID_MPEG_VIDEO_ROI_CONTROL) {
 		mfc_err_ctx("Not support feature(0x%x) for F/W\n", ctrl->id);
 		return -ERANGE;
 	}
@@ -451,9 +445,6 @@ static int enc_to_buf_ctrls(struct s5p_mfc_ctx *ctx, struct list_head *head)
 {
 	struct s5p_mfc_ctx_ctrl *ctx_ctrl;
 	struct s5p_mfc_buf_ctrl *buf_ctrl;
-	struct s5p_mfc_enc *enc = ctx->enc_priv;
-	int index = 0;
-	unsigned int reg = 0;
 
 	list_for_each_entry(ctx_ctrl, &ctx->ctrls, list) {
 		if (!(ctx_ctrl->type & MFC_CTRL_TYPE_SET) || !ctx_ctrl->has_new)
@@ -470,20 +461,6 @@ static int enc_to_buf_ctrls(struct s5p_mfc_ctx *ctx, struct list_head *head)
 					buf_ctrl->updated = 0;
 
 				ctx_ctrl->has_new = 0;
-				if (buf_ctrl->id == V4L2_CID_MPEG_VIDEO_ROI_CONTROL) {
-					index = enc->roi_index;
-					if (enc->roi_info[index].enable) {
-						enc->roi_index =
-							(index + 1) % MFC_MAX_EXTRA_BUF;
-						reg |= enc->roi_info[index].enable;
-						reg &= ~(0xFF << 8);
-						reg |= (enc->roi_info[index].lower_qp << 8);
-						reg &= ~(0xFFFF << 16);
-						reg |= (enc->roi_info[index].upper_qp << 16);
-					}
-					buf_ctrl->val = reg;
-					buf_ctrl->old_val2 = index;
-				}
 				break;
 			}
 		}
@@ -586,7 +563,7 @@ static int enc_set_buf_ctrls_val(struct s5p_mfc_ctx *ctx, struct list_head *head
 			== V4L2_CID_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_LAYER_CH) {
 
 			memcpy(&temporal_LC,
-				enc->sh_handle_svc.virt, sizeof(struct temporal_layer_info));
+				enc->sh_handle.virt, sizeof(struct temporal_layer_info));
 
 			if(((temporal_LC.temporal_layer_count & 0x7) < 1) ||
 				((temporal_LC.temporal_layer_count > 3) &&
@@ -676,12 +653,6 @@ static int enc_set_buf_ctrls_val(struct s5p_mfc_ctx *ctx, struct list_head *head
 		/* per buffer QP setting change */
 		if (buf_ctrl->id == V4L2_CID_MPEG_MFC_CONFIG_QP)
 			p->config_qp = buf_ctrl->val;
-
-		/* set the ROI buffer DVA */
-		if ((buf_ctrl->id == V4L2_CID_MPEG_VIDEO_ROI_CONTROL) &&
-				FW_HAS_ROI_CONTROL(dev))
-			MFC_WRITEL(enc->roi_buf[buf_ctrl->old_val2].ofs,
-						S5P_FIMV_E_ROI_BUFFER_ADDR);
 
 invalid_layer_count:
 		mfc_debug(8, "Set buffer control "\
@@ -798,7 +769,7 @@ static int enc_set_buf_ctrls_val_nal_q(struct s5p_mfc_ctx *ctx,
 		case V4L2_CID_MPEG_VIDEO_VP8_HIERARCHICAL_CODING_LAYER_CH:
 		case V4L2_CID_MPEG_VIDEO_VP9_HIERARCHICAL_CODING_LAYER_CH:
 			memcpy(&temporal_LC,
-				enc->sh_handle_svc.virt, sizeof(struct temporal_layer_info));
+				enc->sh_handle.virt, sizeof(struct temporal_layer_info));
 
 			if (((temporal_LC.temporal_layer_count & 0x7) < 1) ||
 				((temporal_LC.temporal_layer_count > 3) &&
@@ -1051,16 +1022,12 @@ static int enc_pre_seq_start(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *dst_mb;
-	dma_addr_t dst_addr;
-	unsigned int dst_size;
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->irqlock, flags);
 
 	dst_mb = list_entry(ctx->dst_queue.next, struct s5p_mfc_buf, list);
-	dst_addr = s5p_mfc_mem_plane_addr(ctx, &dst_mb->vb, 0);
-	dst_size = (unsigned int)vb2_plane_size(&dst_mb->vb, 0);
-	s5p_mfc_set_enc_stream_buffer(ctx, dst_addr, dst_size);
+	s5p_mfc_set_enc_stream_buffer(ctx, dst_mb);
 
 	spin_unlock_irqrestore(&dev->irqlock, flags);
 
@@ -1134,8 +1101,7 @@ static int enc_pre_frame_start(struct s5p_mfc_ctx *ctx)
 	struct s5p_mfc_raw_info *raw;
 	unsigned long flags;
 	dma_addr_t src_addr[3] = { 0, 0, 0 };
-	dma_addr_t dst_addr;
-	unsigned int dst_size, i;
+	unsigned int i;
 
 	raw = &ctx->raw_buf;
 	spin_lock_irqsave(&dev->irqlock, flags);
@@ -1154,13 +1120,9 @@ static int enc_pre_frame_start(struct s5p_mfc_ctx *ctx)
 	s5p_mfc_set_enc_frame_buffer(ctx, &src_addr[0], raw->num_planes);
 
 	dst_mb = list_entry(ctx->dst_queue.next, struct s5p_mfc_buf, list);
-	dst_addr = s5p_mfc_mem_plane_addr(ctx, &dst_mb->vb, 0);
-	dst_size = (unsigned int)vb2_plane_size(&dst_mb->vb, 0);
-	s5p_mfc_set_enc_stream_buffer(ctx, dst_addr, dst_size);
+	s5p_mfc_set_enc_stream_buffer(ctx, dst_mb);
 
 	spin_unlock_irqrestore(&dev->irqlock, flags);
-
-	mfc_debug(2, "enc dst addr: 0x%08lx", (unsigned long)dst_addr);
 
 	return 0;
 }
@@ -1689,13 +1651,6 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 					ctx->num);
 			return -ENOMEM;
 		}
-		if (FW_HAS_ROI_CONTROL(dev)) {
-			ret = s5p_mfc_alloc_enc_roi_buffer(ctx);
-			if (ret) {
-				mfc_err_ctx("Failed to allocate ROI buffers.\n");
-				return -ENOMEM;
-			}
-		}
 
 		spin_lock_irq(&dev->condlock);
 		set_bit(ctx->num, &dev->ctx_work_bits);
@@ -1913,11 +1868,18 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 	int ret = -EINVAL;
 
 	mfc_debug_enter();
+
 	mfc_debug(2, "Enqueued buf: %d (type = %d)\n", buf->index, buf->type);
 	if (ctx->state == MFCINST_ERROR) {
 		mfc_err_ctx("Call on QBUF after unrecoverable error.\n");
 		return -EIO;
 	}
+
+	if (V4L2_TYPE_IS_MULTIPLANAR(buf->type) && !buf->length) {
+		mfc_err_ctx("multiplanar but length is zero\n");
+		return -EIO;
+	}
+
 	if (buf->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		ret = vb2_qbuf(&ctx->vq_src, buf);
 		if (!ret) {
@@ -1954,17 +1916,12 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 				if (ctx->avg_framerate > ENC_HIGH_FPS) {
 					if (ctx->frame_count == ENC_AVG_FRAMES) {
 						mfc_debug(2, "force fps: %d\n", ENC_MAX_FPS);
-						ctx->framerate = ENC_MAX_FPS;
 						ctx->is_max_fps = 1;
-						s5p_mfc_qos_on(ctx);
 					}
 					goto out;
 				}
 			} else {
-				if (ctx->is_max_fps)
-					ctx->last_framerate = ENC_MAX_FPS;
-				else
-					ctx->last_framerate = ENC_DEFAULT_FPS;
+				ctx->last_framerate = ENC_MAX_FPS;
 				mfc_debug(2, "fps set to %d\n", ctx->last_framerate);
 			}
 calc_again:
@@ -2096,8 +2053,8 @@ static int enc_ext_info(struct s5p_mfc_ctx *ctx)
 	if (FW_SUPPORT_SKYPE(dev))
 		val |= ENC_SET_SKYPE_FLAG;
 
-	if (FW_HAS_ROI_CONTROL(dev))
-		val |= ENC_SET_ROI_CONTROL;
+	if (FW_HAS_FIXED_SLICE(dev))
+		val |= ENC_SET_FIXED_SLICE;
 
 	val |= ENC_SET_QP_BOUND_PB;
 
@@ -2878,9 +2835,6 @@ static int set_enc_param(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 	case V4L2_CID_MPEG_MFC90_VIDEO_HEVC_STORE_REF:
 		p->codec.hevc.store_ref = ctrl->value;
 		break;
-	case V4L2_CID_MPEG_VIDEO_ROI_ENABLE:
-		p->codec.hevc.roi_enable = ctrl->value;
-		break;
 	case V4L2_CID_MPEG_MFC_H264_VUI_RESTRICTION_ENABLE:
 		p->codec.h264.vui_enable = ctrl->value;
 		break;
@@ -2901,54 +2855,54 @@ static int set_enc_param(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 	return ret;
 }
 
-static int process_user_shared_handle_enc(struct s5p_mfc_ctx *ctx,
-			struct mfc_user_shared_handle *handle)
+static int process_user_shared_handle_enc(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
+	struct s5p_mfc_enc *enc = ctx->enc_priv;
 	int ret = 0;
 
-	handle->ion_handle =
-		ion_import_dma_buf(dev->mfc_ion_client, handle->fd);
-	if (IS_ERR(handle->ion_handle)) {
+	enc->sh_handle.ion_handle =
+		ion_import_dma_buf(dev->mfc_ion_client, enc->sh_handle.fd);
+	if (IS_ERR(enc->sh_handle.ion_handle)) {
 		mfc_err_ctx("Failed to import fd\n");
-		ret = PTR_ERR(handle->ion_handle);
+		ret = PTR_ERR(enc->sh_handle.ion_handle);
 		goto import_dma_fail;
 	}
 
-	handle->virt =
-		ion_map_kernel(dev->mfc_ion_client, handle->ion_handle);
-	if (handle->virt == NULL) {
+	enc->sh_handle.virt =
+		ion_map_kernel(dev->mfc_ion_client, enc->sh_handle.ion_handle);
+	if (enc->sh_handle.virt == NULL) {
 		mfc_err_ctx("Failed to get kernel virtual address\n");
 		ret = -EINVAL;
 		goto map_kernel_fail;
 	}
 
 	mfc_debug(2, "User Handle: fd = %d, virt = 0x%p\n",
-				handle->fd, handle->virt);
+				enc->sh_handle.fd, enc->sh_handle.virt);
 
 	return 0;
 
 map_kernel_fail:
-	ion_free(dev->mfc_ion_client, handle->ion_handle);
+	ion_free(dev->mfc_ion_client, enc->sh_handle.ion_handle);
 
 import_dma_fail:
 	return ret;
 }
 
 
-int enc_cleanup_user_shared_handle(struct s5p_mfc_ctx *ctx,
-				struct mfc_user_shared_handle *handle)
+int enc_cleanup_user_shared_handle(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
+	struct s5p_mfc_enc *enc = ctx->enc_priv;
 
-	if (handle->fd == -1)
+	if (enc->sh_handle.fd == -1)
 		return 0;
 
-	if (handle->virt)
+	if (enc->sh_handle.virt)
 		ion_unmap_kernel(dev->mfc_ion_client,
-					handle->ion_handle);
+					enc->sh_handle.ion_handle);
 
-	ion_free(dev->mfc_ion_client, handle->ion_handle);
+	ion_free(dev->mfc_ion_client, enc->sh_handle.ion_handle);
 
 	return 0;
 }
@@ -2963,7 +2917,6 @@ static int set_ctrl_val(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 	struct s5p_mfc_ctx_ctrl *ctx_ctrl;
 	int ret = 0;
 	int found = 0;
-	int index = 0;
 
 	switch (ctrl->id) {
 	case V4L2_CID_CACHEABLE:
@@ -3020,7 +2973,6 @@ static int set_ctrl_val(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 	case V4L2_CID_MPEG_MFC_H264_USE_LTR:
 	case V4L2_CID_MPEG_MFC_H264_BASE_PRIORITY:
 	case V4L2_CID_MPEG_MFC_CONFIG_QP:
-	case V4L2_CID_MPEG_VIDEO_ROI_CONTROL:
 		list_for_each_entry(ctx_ctrl, &ctx->ctrls, list) {
 			if (!(ctx_ctrl->type & MFC_CTRL_TYPE_SET))
 				continue;
@@ -3040,11 +2992,10 @@ static int set_ctrl_val(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 					V4L2_CID_MPEG_VIDEO_VP9_HIERARCHICAL_CODING_LAYER_CH) ||
 					(ctx_ctrl->id == \
 					V4L2_CID_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_LAYER_CH)) &&
-					(enc->sh_handle_svc.fd == -1)) {
-						enc->sh_handle_svc.fd = ctrl->value;
-						if (process_user_shared_handle_enc(ctx,
-									&enc->sh_handle_svc)) {
-							enc->sh_handle_svc.fd = -1;
+					(enc->sh_handle.fd == -1)) {
+						enc->sh_handle.fd = ctrl->value;
+						if (process_user_shared_handle_enc(ctx)) {
+							enc->sh_handle.fd = -1;
 							return -EINVAL;
 						}
 				}
@@ -3052,24 +3003,6 @@ static int set_ctrl_val(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 					ctx_ctrl->val = h264_level((enum v4l2_mpeg_video_h264_level)(ctrl->value));
 				if (ctx_ctrl->id == V4L2_CID_MPEG_VIDEO_H264_PROFILE)
 					ctx_ctrl->val = h264_profile(ctx, (enum v4l2_mpeg_video_h264_profile)(ctrl->value));
-				if (ctx_ctrl->id == \
-					V4L2_CID_MPEG_VIDEO_ROI_CONTROL) {
-					enc->sh_handle_roi.fd = ctrl->value;
-					if (process_user_shared_handle_enc(ctx,
-								&enc->sh_handle_roi)) {
-						enc->sh_handle_roi.fd = -1;
-						return -EINVAL;
-					}
-					index = enc->roi_index;
-					memcpy(&enc->roi_info[index],
-							enc->sh_handle_roi.virt,
-							sizeof(struct mfc_enc_roi_info));
-					if (copy_from_user(enc->roi_buf[index].virt,
-							enc->roi_info[index].addr,
-							enc->roi_info[index].size))
-						return -EFAULT;
-				}
-
 				found = 1;
 				break;
 			}
@@ -3759,7 +3692,7 @@ int s5p_mfc_init_enc_ctx(struct s5p_mfc_ctx *ctx)
 	ctx->src_queue_cnt_nal_q = 0;
 	ctx->dst_queue_cnt_nal_q = 0;
 
-	ctx->framerate = ENC_DEFAULT_FPS;
+	ctx->framerate = ENC_MAX_FPS;
 	ctx->qos_ratio = 100;
 #ifdef CONFIG_MFC_USE_BUS_DEVFREQ
 	INIT_LIST_HEAD(&ctx->qos_list);
@@ -3779,8 +3712,7 @@ int s5p_mfc_init_enc_ctx(struct s5p_mfc_ctx *ctx)
 
 	INIT_LIST_HEAD(&enc->ref_queue);
 	enc->ref_queue_cnt = 0;
-	enc->sh_handle_svc.fd = -1;
-	enc->sh_handle_roi.fd = -1;
+	enc->sh_handle.fd = -1;
 
 	/* Init videobuf2 queue for OUTPUT */
 	ctx->vq_src.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;

@@ -28,11 +28,6 @@
 
 #define FIRST_SENSOR		0
 
-#define QUAD_MODE		(0)
-#define DUAL_MODE		(1)
-#define DUAL_CPU		(2)
-#define QUAD_CPU		(4)
-
 enum calibration_type {
 	TYPE_ONE_POINT_TRIMMING,
 	TYPE_ONE_POINT_TRIMMING_25,
@@ -55,6 +50,8 @@ enum soc_type {
 	SOC_ARCH_EXYNOS5420_TRIMINFO,
 	SOC_ARCH_EXYNOS5440,
 	SOC_ARCH_EXYNOS7580,
+	SOC_ARCH_EXYNOS7870,
+	SOC_ARCH_EXYNOS7880,
 	SOC_ARCH_EXYNOS8890,
 };
 
@@ -271,7 +268,6 @@ struct exynos_tmu_registers {
  * This structure is required for configuration of exynos_tmu driver.
  */
 struct exynos_tmu_platform_data {
-	/* ect related variables */
 	char *tmu_name;
 	int ect_hotplug_flag;
 	int ect_hotplug_interval;
@@ -307,6 +303,8 @@ struct exynos_tmu_platform_data {
 	unsigned int freq_tab_count;
 	const struct exynos_tmu_registers *registers;
 	unsigned int features;
+
+	u8 sensor_type;
 };
 
 /**

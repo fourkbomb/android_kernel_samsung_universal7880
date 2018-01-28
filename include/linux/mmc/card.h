@@ -14,6 +14,10 @@
 #include <linux/mmc/core.h>
 #include <linux/mod_devicetable.h>
 
+#define MAX_CNT_U64     0xFFFFFFFFFF
+#define MAX_CNT_U32     0x7FFFFFFF
+#define STATUS_MASK     (R1_ERROR | R1_CC_ERROR | R1_CARD_ECC_FAILED | R1_WP_VIOLATION | R1_OUT_OF_RANGE)
+
 struct mmc_cid {
 	unsigned int		manfid;
 	char			prod_name[8];
@@ -119,6 +123,22 @@ struct mmc_ext_csd {
 
 	unsigned int            feature_support;
 #define MMC_DISCARD_FEATURE	BIT(0)                  /* CMD38 feature */
+	/*
+	 * smart_info : It's for eMMC 5.0 or later device
+	 * [63:56] : DEVICE_LIFE_TIME_EST_TYPE_B [269]
+	 * [55:48] : DEVICE_LIFE_TIME_EST_TYPE_A [268]
+	 * [47:40] : PRE_EOL_INFO [267]
+	 * [39:32] : OPTIMAL_TRIM_UNIT_SIZE [264]
+	 * [31:16] : DEVICE_VERSION [263-262]
+	 * [15:08] : HC_ERASE_GRP_SIZE [224]
+	 * [07:00] : HC_WP_GRP_SIZE [221]
+	 */
+	unsigned long long	smart_info;
+	/*
+	 * fwdate : It's for eMMC 5.0 or later device
+	 * [63:00] : FIRMWARE_VERSION [261-254]
+	 */
+	unsigned long long	fwdate;
 };
 
 struct sd_scr {
@@ -240,6 +260,20 @@ struct mmc_part {
 #define MMC_BLK_DATA_AREA_RPMB	(1<<3)
 };
 
+struct mmc_card_error_log {
+	char	type[4];	// sbc, cmd, data, stop, busy
+	int	err_type;
+	u32	status;
+	u64	first_issue_time;
+	u64	last_issue_time;
+	u32	count;
+	u32 	ge_cnt; 		// status[19] : general error or unknown error
+	u32 	cc_cnt; 		// status[20] : internal card controller error
+	u32 	ecc_cnt;		// status[21] : ecc error
+	u32 	wp_cnt; 		// status[26] : write protection error
+	u32 	oor_cnt;		// status[31] : out of range error
+};
+
 /*
  * MMC device
  */
@@ -309,6 +343,9 @@ struct mmc_card {
 	struct mmc_part	part[MMC_NUM_PHY_PARTITION]; /* physical partitions */
 	unsigned int    nr_parts;
 	u8 en_strobe_enhanced;	/*enhanced strobe ctrl */
+
+	struct device_attribute error_count;
+	struct mmc_card_error_log err_log[10];
 };
 
 /*

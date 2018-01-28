@@ -44,24 +44,23 @@ static struct file *mfilp_normal = NULL;
 
 #endif
 
-#ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
 #define NMIXBUF_441_110_SIZE		110 /* PCM 16bit 2ch */
 #define NMIXBUF_441_110_BYTE		(NMIXBUF_441_110_SIZE * 4) /* PCM 16bit 2ch */
 #define NMIXBUF_441_441_SIZE		441 /* PCM 16bit 2ch */
 #define NMIXBUF_441_441_BYTE		(NMIXBUF_441_441_SIZE * 4) /* PCM 16bit 2ch */
-#endif
 
 #define NMIXBUF_SIZE		120 /* PCM 16bit 2ch */
 #define NMIXBUF_BYTE		(NMIXBUF_SIZE * 4) /* PCM 16bit 2ch */
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-#define UMIXBUF_SIZE		512 /* Total 16384 byte / 2ch / 4byte / 4 periods */
-#else
 #define UMIXBUF_SIZE		480 /* Total 15360 byte / 2ch / 4byte / 4 periods */
-#endif
 #define UMIXBUF_BYTE		(UMIXBUF_SIZE * 8) /* PCM 32bit 2ch */
 #define DMA_PERIOD_CNT		4
 #define DMA_START_THRESHOLD	(DMA_PERIOD_CNT - 1)
-#define SOUNDCAMP_HIGH_PERIOD_BYTE	(480 * 4)  /* PCM 16bit 2ch */
+/*
+Total buffer size is 15360 bytes, (480*16bit(4byte)*2ch*4periods=480*4*2*4=15360bytes)
+Hence SOUNDCAMP_HIGH_PERIOD_BYTE is corrected from 480*4 to 480*4*2 to decide buffer
+is UHQA or not when SEIREN_OFFLOAD is disabled in the kernel.
+*/
+#define SOUNDCAMP_HIGH_PERIOD_BYTE	(480 * 4 * 2)  /* PCM 16bit 2ch */
 
 static const struct snd_pcm_hardware dma_hardware = {
 	.info			= SNDRV_PCM_INFO_INTERLEAVED |
@@ -85,10 +84,8 @@ struct runtime_data {
 	bool			running;
 	struct snd_pcm_substream *substream;
 	struct snd_soc_dai	*cpu_dai;
-#ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
 	snd_pcm_format_t 	format;
 	unsigned int 		rate;
-#endif
 	unsigned int		dma_period;
 	dma_addr_t		dma_start;
 	dma_addr_t		dma_pos;
@@ -131,7 +128,7 @@ static struct dma_info {
 	struct mutex		mutex;
 	struct snd_soc_dai	*cpu_dai;
 	struct s3c_dma_params	*params;
-	unsigned int		set_params_cnt;
+	volatile unsigned long	set_params_bitmap;
 	bool			params_init;
 	bool			params_done;
 	bool			prepare_done;
@@ -231,17 +228,10 @@ int check_eax_dma_status(void)
 	return di.running;
 }
 
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-static int eax_dma_is_uhqa(unsigned long dma_bytes)
-{
-	return (dma_bytes > (SOUNDCAMP_HIGH_PERIOD_BYTE * DMA_PERIOD_CNT));
-}
-#else
 static int eax_dma_is_uhqa(snd_pcm_format_t format)
 {
 	return (SNDRV_PCM_FORMAT_S24_LE == format);
 }
-#endif
 
 static inline bool eax_mixer_any_buf_running(void)
 {
@@ -268,7 +258,7 @@ static void eax_adma_alloc_buf(void)
 	iommu_map(domain, 0x48000000, di.dma_start, size, 0);
 	di.dma_start = 0x48000000;
 #else
-	size_t size = 480 * DMA_PERIOD_CNT; /* default: 16bit 2ch */
+	size_t size = 128 * 1024;
 	di.dma_buf = dma_alloc_coherent(di.cpu_dai->dev,
 				size, &di.dma_start, GFP_KERNEL);
 #endif
@@ -285,7 +275,7 @@ static void eax_adma_free_buf(void)
 	iommu_unmap(domain, 0x48000000, size);
 	di.dma_start = 0;
 #else
-	size_t size = 480 * DMA_PERIOD_CNT; /* default: 16bit 2ch */
+	size_t size = 128 * 1024;
 	dma_free_coherent(di.cpu_dai->dev, size, (void *)di.dma_buf, di.dma_start);
 #endif
 	memset(di.buf_wr_p, 0, sizeof(unsigned char *) * DMA_PERIOD_CNT);
@@ -364,7 +354,7 @@ static void eax_adma_buffdone(void *data)
 	dma_addr_t src, dst, pos;
 	int buf_idx;
 
-	if (!di.running || !di.params->ch)
+	if (!di.running || !di.params->ch || !di.params_init)
 		return;
 
 	di.params->ops->getposition(di.params->ch, &src, &dst);
@@ -406,7 +396,7 @@ static void eax_adma_hw_params(unsigned long dma_period_bytes)
 				&req, di.cpu_dai->dev, di.params->ch_name);
 		if (!di.params->ch) {
 			pr_err("EAXDMA: Failed to request DMA channel %s\n",
-				di.params->ch_name);
+			di.params->ch_name);
 			return;
 		}
 		di.params->ops->config(di.params->ch, &config);
@@ -427,7 +417,7 @@ out:
 	mutex_unlock(&di.mutex);
 }
 
-static void eax_adma_hw_free(void)
+static void eax_adma_hw_free(struct snd_pcm_substream *substream)
 {
 	mutex_lock(&di.mutex);
 	pr_info("Entered %s ++\n", __func__);
@@ -438,7 +428,8 @@ static void eax_adma_hw_free(void)
 		goto out;
 	}
 
-	if (di.params_init && (di.set_params_cnt == 1)) {
+	if (di.params_init && test_bit(substream->pcm->device, &di.set_params_bitmap)
+			&& (hweight_long(di.set_params_bitmap) == 1)) {
 		pr_info("EAXADMA: release dma channel : %s\n", di.params->ch_name);
 		di.params_init = false;
 		if (di.params->ch) {
@@ -450,14 +441,12 @@ static void eax_adma_hw_free(void)
 			if (mi.running)
 				break;
 			usleep_range(50, 100);
-		};
+		}
 	}
-
 	di.params_done = false;
 	di.prepare_done = false;
-
 out:
-	di.set_params_cnt--;
+	clear_bit(substream->pcm->device, &di.set_params_bitmap);
 	pr_info("Entered %s --\n", __func__);
 	mutex_unlock(&di.mutex);
 }
@@ -511,12 +500,14 @@ out:
 
 static void eax_adma_trigger(bool on)
 {
-	spin_lock(&di.lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&di.lock, flags);
 
 	if (on) {
 		di.running = on;
 		lpass_dma_enable(true);
-		lpass_inc_dram_usage_count();
+		inc_dram_usage_count();
 		/* eax always uses dram */
 		lpass_update_lpclock(LPCLK_CTRLID_LEGACY, true);
 		if (di.params->ch)
@@ -525,13 +516,13 @@ static void eax_adma_trigger(bool on)
 		if (di.params->ch)
 			di.params->ops->stop(di.params->ch);
 		lpass_dma_enable(false);
-		lpass_dec_dram_usage_count();
+		dec_dram_usage_count();
 		di.prepare_done = false;
 		di.running = on;
 		lpass_update_lpclock(LPCLK_CTRLID_LEGACY, false);
 	}
 
-	spin_unlock(&di.lock);
+	spin_unlock_irqrestore(&di.lock, flags);
 }
 
 static inline void eax_dma_xfer(struct runtime_data *prtd,
@@ -539,11 +530,7 @@ static inline void eax_dma_xfer(struct runtime_data *prtd,
 {
 	dma_addr_t dma_pos;
 
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-	if (eax_dma_is_uhqa(prtd->dma_bytes)) {
-#else
 	if (eax_dma_is_uhqa(prtd->format)) {
-#endif
 		if (!prtd->uhqa_dma_mono || !upcm_l || !upcm_r) {
 			pr_err("%s : UHQA DMA MONO Pointer is NULL\n", __func__);
 			return;
@@ -612,44 +599,25 @@ static int eax_dma_hw_params(struct snd_pcm_substream *substream,
 	prtd->dma_end = prtd->dma_start + totbytes;
 	prtd->dma_buf = (u32 *)(runtime->dma_area);
 	prtd->dma_bytes = totbytes;
-	if (eax_dma_is_uhqa(totbytes)) {
+	if (eax_dma_is_uhqa(prtd->format)) {
 		prtd->uhqa_dma_mono = (int *)prtd->dma_buf;
 		prtd->normal_dma_mono = NULL;
 	} else {
 		prtd->normal_dma_mono = (short *)prtd->dma_buf;
 		prtd->uhqa_dma_mono = NULL;
 	}
-#ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
 	prtd->format = params_format(params);
 	prtd->rate = params_rate(params);
-#endif
 	spin_unlock_irq(&prtd->lock);
 
 	spin_lock_irq(&mi.lock);
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-	if (mi.is_uhqa && !eax_dma_is_uhqa(prtd->dma_bytes))
-		return -EINVAL;
-#endif
 
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-	if (eax_dma_is_uhqa(prtd->dma_bytes)) {
-#else
 	if (eax_dma_is_uhqa(prtd->format)) {
-#endif
 		mi.is_uhqa = true;
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-		mi.mixbuf_size = totbytes / DMA_PERIOD_CNT / 8;
-		mi.mixbuf_byte = totbytes / DMA_PERIOD_CNT;
-#else
 		mi.mixbuf_size = UMIXBUF_SIZE;
 		mi.mixbuf_byte = UMIXBUF_BYTE;
-#endif
 	} else {
 		mi.is_uhqa = false;
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-		mi.mixbuf_size = NMIXBUF_SIZE;
-		mi.mixbuf_byte = NMIXBUF_BYTE;
-#else
 		if (prtd->rate == 44100) {
 			if (prtd->dma_period > NMIXBUF_441_110_BYTE) {
 				mi.mixbuf_size = NMIXBUF_441_441_SIZE;
@@ -662,7 +630,6 @@ static int eax_dma_hw_params(struct snd_pcm_substream *substream,
 			mi.mixbuf_size = NMIXBUF_SIZE;
 			mi.mixbuf_byte = NMIXBUF_BYTE;
 		}
-#endif
 	}
 	spin_unlock_irq(&mi.lock);
 
@@ -698,7 +665,8 @@ static int eax_dma_hw_free(struct snd_pcm_substream *substream)
 #ifdef EAX_DMA_PCM_DUMP
         close_file(prtd);
 #endif
-	eax_adma_hw_free();
+
+	eax_adma_hw_free(substream);
 
 	return 0;
 }
@@ -711,34 +679,20 @@ static int eax_dma_prepare(struct snd_pcm_substream *substream)
 	pr_debug("Entered %s\n", __func__);
 
 	mutex_lock(&di.mutex);
-	di.set_params_cnt++;
+	set_bit(substream->pcm->device, &di.set_params_bitmap) ;
 	mutex_unlock(&di.mutex);
 
 	prtd->dma_pos = prtd->dma_start;
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-	if (eax_dma_is_uhqa(prtd->dma_bytes)) {
-#else
 	if (eax_dma_is_uhqa(prtd->format)) {
-#endif
 		prtd->uhqa_dma_mono = (int *)prtd->dma_buf;
 		prtd->normal_dma_mono = NULL;
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-		eax_adma_hw_params(prtd->dma_bytes / DMA_PERIOD_CNT);
-		eax_adma_prepare(prtd->dma_bytes / DMA_PERIOD_CNT);
-#else
 		eax_adma_hw_params(UMIXBUF_BYTE);
 		eax_adma_prepare(UMIXBUF_BYTE);
-#endif
 	} else {
 		prtd->normal_dma_mono = (short *)prtd->dma_buf;
 		prtd->uhqa_dma_mono = NULL;
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-		eax_adma_hw_params(NMIXBUF_BYTE);
-		eax_adma_prepare(NMIXBUF_BYTE);
-#else
 		eax_adma_hw_params(mi.mixbuf_byte);
 		eax_adma_prepare(mi.mixbuf_byte);
-#endif
 	}
 
 	return ret;
@@ -813,12 +767,6 @@ static int eax_dma_open(struct snd_pcm_substream *substream)
 
 	eax_mixer_add(prtd);
 
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-	spin_lock(&mi.lock);
-	mi.is_uhqa= 0;
-	spin_unlock(&mi.lock);
-#endif
-
 	return 0;
 }
 
@@ -828,20 +776,11 @@ static int eax_dma_close(struct snd_pcm_substream *substream)
 	struct runtime_data *prtd = runtime->private_data;
 
 	pr_debug("Entered %s\n", __func__);
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-	spin_lock(&mi.lock);
-	mi.is_uhqa= 0;
-	spin_unlock(&mi.lock);
-
-	eax_mixer_remove(prtd);
-#endif
 
 	if (!prtd)
 		pr_debug("dma_close called with prtd == NULL\n");
 
-#ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
 	eax_mixer_remove(prtd);
-#endif
 	kfree(prtd);
 
 	return 0;
@@ -914,11 +853,7 @@ static int eax_dma_new(struct snd_soc_pcm_runtime *rtd)
 	}
 #endif
 
-#ifndef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-	mi.nmix_buf = kzalloc(NMIXBUF_BYTE, GFP_KERNEL);
-#else
 	mi.nmix_buf = kzalloc(NMIXBUF_441_441_BYTE, GFP_KERNEL);
-#endif
 	if (mi.nmix_buf == NULL)
 		return -ENOMEM;
 
@@ -1096,14 +1031,13 @@ static void eax_mixer_write(void)
 	int ret;
 
 	spin_lock(&mi.lock);
-	if (!eax_mixer_any_buf_running() || !mi.running) {
+	if (!eax_mixer_any_buf_running()) {
 		spin_unlock(&mi.lock);
 		return;
 	}
 	spin_unlock(&mi.lock);
 
-	if (!di.running && di.buf_fill[DMA_START_THRESHOLD] &&
-		mi.running) {
+	if (!di.running && di.buf_fill[DMA_START_THRESHOLD]) {
 		if (!di.prepare_done) {
 			eax_adma_hw_params(mi.mixbuf_byte);
 			eax_adma_prepare(mi.mixbuf_byte);

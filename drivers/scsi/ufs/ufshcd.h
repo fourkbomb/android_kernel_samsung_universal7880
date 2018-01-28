@@ -63,7 +63,6 @@
 #include <scsi/scsi_tcq.h>
 #include <scsi/scsi_dbg.h>
 #include <scsi/scsi_eh.h>
-#include <scsi/scsi_ioctl.h>
 
 #include "ufs.h"
 #include "ufshci.h"
@@ -528,6 +527,10 @@ struct ufs_hba {
 	bool is_sys_suspended;
 
 	u32 quirks;
+
+	struct buffer_head *self_test_bh;
+	uint32_t self_test_mode;
+	struct ufshcd_sg_entry *ucd_prdt_ptr_st;
 
 /* UFSHCI doesn't support DWORD size in UTRD */
 #define UFSHCI_QUIRK_BROKEN_DWORD_UTRD		BIT(0)

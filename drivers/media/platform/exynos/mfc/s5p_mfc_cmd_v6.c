@@ -12,6 +12,8 @@
 
 #include "s5p_mfc_cmd.h"
 
+extern int dbg_enable;
+
 int s5p_mfc_cmd_host2risc(struct s5p_mfc_dev *dev, int cmd,
 				struct s5p_mfc_cmd_args *args)
 {
@@ -20,6 +22,12 @@ int s5p_mfc_cmd_host2risc(struct s5p_mfc_dev *dev, int cmd,
 	/* Reset RISC2HOST command except nal q stop command */
 	if (cmd != S5P_FIMV_CH_STOP_QUEUE)
 		MFC_WRITEL(0x0, S5P_FIMV_RISC2HOST_CMD);
+
+	if (dbg_enable) {
+		/* For FW debugging */
+		s5p_mfc_dbg_set_addr(dev);
+		s5p_mfc_dbg_enable(dev);
+	}
 
 	/* Issue the command */
 	MFC_WRITEL(cmd, S5P_FIMV_HOST2RISC_CMD);

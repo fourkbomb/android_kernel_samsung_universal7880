@@ -23,7 +23,6 @@
 #include <linux/pm_qos.h>
 #include <linux/fb.h>
 #include <linux/iommu.h>
-#include <linux/exynos_iovmm.h>
 #include <linux/dma-mapping.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -34,11 +33,7 @@
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
 
-#include <asm/tlbflush.h>
-
 #include <sound/exynos.h>
-
-#include <soc/samsung/exynos-pm.h>
 
 #if 0
 #include <mach/map.h>
@@ -56,7 +51,7 @@
 #endif
 
 #ifdef CONFIG_PM_DEVFREQ
-#define USE_AUD_DEVFREQ
+#undef USE_AUD_DEVFREQ
 #ifdef CONFIG_SOC_EXYNOS5422
 #define AUD_CPU_FREQ_UHQA	(1000000)
 #define AUD_KFC_FREQ_UHQA	(1300000)
@@ -136,11 +131,6 @@
 #define EXYNOS_GPIO_MODE_AUD_SYS_PWR_REG_OFFSET	0x1340
 #define EXYNOS_PAD_RETENTION_AUD_OPTION_OFFSET 	0x3028
 
-#ifdef CONFIG_SOC_EXYNOS8890
-#define SRAM_BASE 0x3000000
-#define SRAM_SIZE 0x24000
-#endif
-
 /* Audio subsystem version */
 enum {
 	LPASS_VER_000100 = 0,		/* pega/carmen */
@@ -201,28 +191,6 @@ extern int check_esa_compr_state(void);
 static void lpass_update_qos(void);
 
 static bool cp_available;
-static atomic_t dram_usage_cnt;
-
-void lpass_disable_mif_status(bool on)
-{
-	u32 val = on ? 1 << 2 : 0x0;
-	writel(val, lpass.regs + LPASS_MIF_POWER);
-}
-
-void lpass_inc_dram_usage_count(void)
-{
-	atomic_inc(&dram_usage_cnt);
-}
-
-void lpass_dec_dram_usage_count(void)
-{
-	atomic_dec(&dram_usage_cnt);
-}
-
-int lpass_get_dram_usage_count(void)
-{
-	return atomic_read(&dram_usage_cnt);
-}
 
 bool lpass_i2s_master_mode(void)
 {
@@ -276,6 +244,14 @@ static inline bool is_running_only(const char *name)
 	return false;
 }
 
+void exynos_aud_alpa_notifier(bool on)
+{
+#ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
+	esa_compr_alpa_notifier(on);
+#endif
+	return;
+}
+
 int exynos_check_aud_pwr(void)
 {
 	int dram_used = check_adma_status();
@@ -299,11 +275,6 @@ int exynos_check_aud_pwr(void)
 		return AUD_PWR_ALPA;
 	else
 		return AUD_PWR_AFTR;
-}
-
-void lpass_update_lpclock(u32 ctrlid, bool idle)
-{
-	lpass_update_lpclock_impl(&lpass.pdev->dev, ctrlid, idle);
 }
 
 void __iomem *lpass_get_regs(void)
@@ -361,8 +332,7 @@ void ass_reset(int ip, int op)
 
 void lpass_reset(int ip, int op)
 {
-	u32 reg, val;
-	u32 bit = 0;
+	u32 reg, val, bit;
 	void __iomem *regs;
 
 	if (is_old_ass()) {
@@ -646,15 +616,6 @@ static void lpass_release_pad(void)
 
 static void ass_enable(void)
 {
-	int ret = 0;
-
-#ifdef CONFIG_SOC_EXYNOS8890
-	lpass.mem = ioremap_wc(SRAM_BASE, SRAM_SIZE);
-	if (!lpass.mem) {
-		pr_err("LPASS driver failed to ioremap sram \n");
-		return;
-	}
-#endif
 	/* Enable PLL */
 	lpass_enable_pll(true);
 
@@ -666,19 +627,11 @@ static void ass_enable(void)
 	clk_prepare_enable(lpass.clk_dmac);
 	clk_prepare_enable(lpass.clk_timer);
 
-	ret = iommu_attach_device(lpass.domain, &lpass.pdev->dev);
-	if (ret) {
-		dev_err(&lpass.pdev->dev,
-			"Unable to attach iommu device: %d\n", ret);
-	} else {
-		lpass.enabled = true;
-	}
+	lpass.enabled = true;
 }
 
 static void lpass_enable(void)
 {
-	int ret = 0;
-
 	if (!lpass.valid) {
 		pr_debug("%s: LPASS is not available", __func__);
 		return;
@@ -706,17 +659,6 @@ static void lpass_enable(void)
 	lpass_reset_toggle(LPASS_IP_I2S);
 	lpass_reset_toggle(LPASS_IP_DMA);
 
-#ifdef CONFIG_SOC_EXYNOS8890
-	if (!lpass.mem) {
-		lpass.mem = ioremap_wc(SRAM_BASE, SRAM_SIZE);
-		if (!lpass.mem) {
-			lpass_enable_pll(false);
-			pr_err("LPASS driver failed to ioremap sram \n");
-			return;
-		}
-	}
-#endif
-
 	if (lpass.clk_dmac)
 		clk_disable_unprepare(lpass.clk_dmac);
 
@@ -724,15 +666,9 @@ static void lpass_enable(void)
 	lpass_release_pad();
 
 	/* Clear memory */
-	memset(lpass.mem, 0, lpass.mem_size);
+//	memset(lpass.mem, 0, lpass.mem_size);
 
-	ret = iommu_attach_device(lpass.domain, &lpass.pdev->dev);
-	if (ret) {
-		dev_err(&lpass.pdev->dev,
-			"Unable to attach iommu device: %d\n", ret);
-	} else {
-		lpass.enabled = true;
-	}
+	lpass.enabled = true;
 }
 
 static void ass_disable(void)
@@ -746,28 +682,15 @@ static void ass_disable(void)
 
 	lpass_reg_save();
 
-	iommu_detach_device(lpass.domain, &lpass.pdev->dev);
-
 	/* OSC path */
 	lpass_set_mux_osc();
 
 	/* Disable PLL */
 	lpass_enable_pll(false);
-
-#ifdef CONFIG_SOC_EXYNOS8890
-	iounmap(lpass.mem);
-	lpass.mem = NULL;
-#endif
-
 }
 
 static void lpass_disable(void)
 {
-#ifdef CONFIG_SOC_EXYNOS8890
-	unsigned long start;
-	unsigned long end;
-#endif
-
 	if (!lpass.valid) {
 		pr_debug("%s: LPASS is not available", __func__);
 		return;
@@ -788,8 +711,6 @@ static void lpass_disable(void)
 
 	lpass_reg_save();
 
-	iommu_detach_device(lpass.domain, &lpass.pdev->dev);
-
 	/* OSC path */
 	lpass_set_mux_osc();
 
@@ -798,14 +719,6 @@ static void lpass_disable(void)
 
 	/* Disable PLL */
 	lpass_enable_pll(false);
-
-#ifdef CONFIG_SOC_EXYNOS8890
-	start = (unsigned long)lpass.mem;
-	end = (unsigned long)lpass.mem + lpass.mem_size;
-	iounmap(lpass.mem);
-	flush_tlb_kernel_range(start, end);
-	lpass.mem = NULL;
-#endif
 }
 
 #if 0
@@ -1111,31 +1024,6 @@ static struct notifier_block fb_noti_block = {
 	.notifier_call = lpass_fb_state_chg,
 };
 
-static int exynos_aud_alpa_notifier(struct notifier_block *nb,
-				unsigned long event, void *data)
-{
-	switch (event) {
-	case SICD_AUD_ENTER:
-#ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-		esa_compr_alpa_notifier(true);
-#endif
-		break;
-	case SICD_AUD_EXIT:
-#ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
-		esa_compr_alpa_notifier(false);
-#endif
-		break;
-	default:
-		break;
-	}
-
-	return NOTIFY_DONE;
-}
-
-static struct notifier_block lpass_lpa_nb = {
-	.notifier_call = exynos_aud_alpa_notifier,
-};
-
 static char banner[] =
 	KERN_INFO "Samsung Low Power Audio Subsystem driver, "\
 		  "(c)2013 Samsung Electronics\n";
@@ -1174,15 +1062,11 @@ static int lpass_probe(struct platform_device *pdev)
 		return -ENXIO;
 	}
 
-#ifndef CONFIG_SOC_EXYNOS8890
 	lpass.mem = ioremap_wc(res->start, resource_size(res));
 	if (!lpass.mem) {
 		dev_err(dev, "SRAM ioremap failed\n");
 		return -ENOMEM;
 	}
-#else
-	lpass.mem = NULL;
-#endif
 	lpass.mem_size = resource_size(res);
 	pr_info("%s: sram_base = %08X (%08X bytes)\n",
 		__func__, (u32)res->start, (u32)resource_size(res));
@@ -1194,7 +1078,7 @@ static int lpass_probe(struct platform_device *pdev)
 			return -ENXIO;
 		}
 
-		lpass.regs_s = ioremap(res->start, resource_size(res));
+		lpass.regs_s = ioremap_wc(res->start, resource_size(res));
 		if (!lpass.regs_s) {
 			dev_err(dev, "SFR ioremap failed\n");
 			return -ENOMEM;
@@ -1220,10 +1104,17 @@ static int lpass_probe(struct platform_device *pdev)
 	lpass_init_clk_gate();
 
 #ifdef CONFIG_SND_SAMSUNG_IOMMU
-	lpass.domain = get_domain_from_dev(dev);
+	lpass.domain = iommu_domain_alloc(pdev->dev.bus);
 	if (!lpass.domain) {
-		dev_err(dev, "Unable to get iommu domain\n");
-		return -ENOENT;
+		dev_err(dev, "Unable to alloc iommu domain\n");
+		return -ENOMEM;
+	}
+
+	ret = iommu_attach_device(lpass.domain, dev);
+	if (ret) {
+		dev_err(dev, "Unable to attach iommu device: %d\n", ret);
+		iommu_domain_free(lpass.domain);
+		return ret;
 	}
 #else
 	/* Bypass SysMMU */
@@ -1262,9 +1153,6 @@ static int lpass_probe(struct platform_device *pdev)
 	regmap_update_bits(lpass.pmureg,
 			EXYNOS_PMU_PMU_DEBUG_OFFSET,
 			0x1F00, 0x1F00);
-	regmap_update_bits(lpass.pmureg,
-			EXYNOS_PMU_PMU_DEBUG_OFFSET,
-			0x1, 0x0);
 
 #ifdef CONFIG_PM_RUNTIME
 	pm_runtime_enable(&lpass.pdev->dev);
@@ -1277,8 +1165,6 @@ static int lpass_probe(struct platform_device *pdev)
 	lpass.display_on = true;
 	fb_register_client(&fb_noti_block);
 
-	lpass_update_lpclock(LPCLK_CTRLID_LEGACY|LPCLK_CTRLID_OFFLOAD, false);
-
 #ifdef USE_AUD_DEVFREQ
 	lpass.cpu_qos = 0;
 	lpass.kfc_qos = 0;
@@ -1289,9 +1175,6 @@ static int lpass_probe(struct platform_device *pdev)
 	pm_qos_add_request(&lpass.aud_mif_qos, PM_QOS_BUS_THROUGHPUT, 0);
 	pm_qos_add_request(&lpass.aud_int_qos, PM_QOS_DEVICE_THROUGHPUT, 0);
 #endif
-
-	exynos_pm_register_notifier(&lpass_lpa_nb);
-
 	pr_info("%s: LPASS driver was registerd successfully\n", __func__);
 	return 0;
 }
@@ -1312,9 +1195,8 @@ static int lpass_remove(struct platform_device *pdev)
 #endif
 	iounmap(lpass.regs);
 	iounmap(lpass.regs_s);
-#ifndef CONFIG_SOC_EXYNOS8890
 	iounmap(lpass.mem);
-#endif
+
 	return 0;
 }
 

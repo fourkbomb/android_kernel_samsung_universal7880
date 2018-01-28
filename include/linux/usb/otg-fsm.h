@@ -26,8 +26,10 @@
 #ifdef VERBOSE
 #define VDBG(fmt, args...) pr_debug("[%s]  " fmt , \
 				 __func__, ## args)
+/*
 #else
 #define VDBG(stuff...)	do {} while (0)
+*/
 #endif
 
 #ifdef VERBOSE
@@ -244,3 +246,4 @@ static inline int otg_start_gadget(struct otg_fsm *fsm, int on)
 int otg_statemachine(struct otg_fsm *fsm);
 
 #endif /* __LINUX_USB_OTG_FSM_H */
+

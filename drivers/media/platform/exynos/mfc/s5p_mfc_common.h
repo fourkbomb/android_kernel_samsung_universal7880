@@ -32,7 +32,7 @@
 #include "s5p_mfc_data_struct.h"
 #include "s5p_mfc_debug.h"
 
-#define MFC_DRIVER_INFO		160106
+#define MFC_DRIVER_INFO		150901
 
 #define MFC_MAX_REF_BUFS	2
 #define MFC_FRAME_PLANES	2
@@ -42,13 +42,13 @@
 /* Interrupt timeout */
 #define MFC_INT_TIMEOUT		2000
 /* Interrupt short timeout */
-#define MFC_INT_SHORT_TIMEOUT	800
+#define MFC_INT_SHORT_TIMEOUT	3000
 /* Busy wait timeout */
 #define MFC_BW_TIMEOUT		500
 /* Watchdog interval */
 #define MFC_WATCHDOG_INTERVAL   1000
 /* After how many executions watchdog should assume lock up */
-#define MFC_WATCHDOG_CNT        5
+#define MFC_WATCHDOG_CNT        15
 
 #define MFC_NO_INSTANCE_SET	-1
 
@@ -92,9 +92,6 @@
 	(((c)->c_ops->op) ?					\
 		((c)->c_ops->op(args)) : 0)
 
-#define MFC_VER_MAJOR(dev)	((mfc_version(dev) >> 8) & 0xF)
-#define MFC_VER_MINOR(dev)	(mfc_version(dev) & 0xF)
-
 /*
  * Version Description
  *
@@ -116,9 +113,11 @@
 				 (mfc_version(dev) == 0x78))
 #define IS_MFCv8X(dev)		(mfc_version(dev) == 0x80)
 #define IS_MFCv9X(dev)		(mfc_version(dev) == 0x90)
-#define IS_MFCv10X(dev)		((mfc_version(dev) == 0xA0) || \
-				 (mfc_version(dev) == 0xA01))
+#define IS_MFCv10X(dev)		((mfc_version(dev) == 0xA01) || \
+				 (mfc_version(dev) == 0xA0A0) || \
+				 (mfc_version(dev) == 0xA0B0))
 #define IS_MFCv78(dev)		(mfc_version(dev) == 0x78)
+#define IS_MFCv101(dev)		(mfc_version(dev) == 0xA01)
 #define IS_MFCV6(dev)		(IS_MFCv6X(dev) || IS_MFCv7X(dev) ||	\
 				IS_MFCv8X(dev) || IS_MFCv9X(dev) ||	\
 				IS_MFCv10X(dev))
@@ -168,10 +167,11 @@
 #define FW_HAS_E_MIN_SCRATCH_BUF(dev)	(IS_MFCv9X(dev) || IS_MFCv10X(dev))
 #define FW_HAS_INT_TIMEOUT(dev)		(IS_MFCv9X(dev) || IS_MFCv10X(dev))
 #define FW_HAS_CONCEAL_CONTROL(dev)	IS_MFCv10X(dev)
+#define FW_HAS_FIXED_SLICE(dev)		(IS_MFCv10X(dev) &&			\
+					(dev->fw.date >= 0x160202))
 
-#define FW_SUPPORT_SKYPE(dev)		IS_MFCv10X(dev) &&		\
+#define FW_SUPPORT_SKYPE(dev)		IS_MFCv101(dev) &&		\
 					(dev->fw.date >= 0x150901)
-#define FW_HAS_ROI_CONTROL(dev)		IS_MFCv10X(dev)
 
 #define HW_LOCK_CLEAR_MASK		(0xFFFFFFFF)
 
@@ -217,8 +217,8 @@
 #define	ENC_SET_SPARE_SIZE		(1 << 1)
 #define	ENC_SET_TEMP_SVC_CH		(1 << 2)
 #define	ENC_SET_SKYPE_FLAG		(1 << 3)
-#define	ENC_SET_ROI_CONTROL		(1 << 4)
 #define	ENC_SET_QP_BOUND_PB		(1 << 5)
+#define	ENC_SET_FIXED_SLICE		(1 << 6)
 
 #define MFC_QOS_FLAG_NODATA		0xFFFFFFFF
 
@@ -238,6 +238,7 @@ static inline unsigned int mfc_linear_buf_size(unsigned int version)
 	case 0x90:
 	case 0xA0:
 	case 0xA01:
+	case 0xA0A0:
 		size = 256;
 		break;
 	default:
@@ -287,6 +288,12 @@ static inline unsigned int mfc_version(struct s5p_mfc_dev *dev)
 		break;
 	case IP_VER_MFC_8J_1:
 		version = 0xA01;
+		break;
+	case IP_VER_MFC_7J_0:
+		version = 0xA0B0;
+		break;
+	case IP_VER_MFC_7J_1:
+		version = 0xA0A0;
 		break;
 	}
 

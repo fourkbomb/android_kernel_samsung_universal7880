@@ -47,6 +47,7 @@
 
 #include "sched.h"
 
+
 /*
  * Targeted preemption latency for CPU-bound tasks:
  * (default: 6ms * (1 + ilog(ncpus)), units: nanoseconds)
@@ -2325,16 +2326,13 @@ struct hmp_data_struct {
 #endif
 	int multiplier; /* used to scale the time delta */
 	int semiboost_multiplier;
-	int rq_multiplier;
 	struct attribute_group attr_group;
 	struct attribute *attributes[HMP_DATA_SYSFS_MAX + 1];
 	struct hmp_global_attr attr[HMP_DATA_SYSFS_MAX];
 } hmp_data = {.multiplier = 1 << HMP_VARIABLE_SCALE_SHIFT,
-	      .semiboost_multiplier = 2 << HMP_VARIABLE_SCALE_SHIFT,
-	      .rq_multiplier = 4 << HMP_VARIABLE_SCALE_SHIFT};
+	      .semiboost_multiplier = 2 << HMP_VARIABLE_SCALE_SHIFT};
 
 static u64 hmp_variable_scale_convert(u64 delta);
-static u64 hmp_rq_variable_scale_convert(u64 delta);
 #ifdef CONFIG_HMP_FREQUENCY_INVARIANT_SCALE
 /* Frequency-Invariant Load Modification:
  * Loads are calculated as in PJT's patch however we also scale the current
@@ -2441,10 +2439,7 @@ static __always_inline int __update_entity_runnable_avg(u64 now,
 
 	delta = now - sa->last_runnable_update;
 #ifdef CONFIG_HMP_VARIABLE_SCALE
-	if (sa == &(cpu_rq(cpu)->avg))
-		delta = hmp_rq_variable_scale_convert(delta);
-	else
-		delta = hmp_variable_scale_convert(delta);
+	delta = hmp_variable_scale_convert(delta);
 #endif
 	/*
 	 * This should only happen when time goes backwards, which it
@@ -2784,8 +2779,6 @@ static inline void update_entity_load_avg(struct sched_entity *se,
 
 	contrib_delta = __update_entity_load_avg_contrib(se, &ratio_delta);
 
-	hp_event_update_entity_load(se);
-
 	if (!update_cfs_rq)
 		return;
 
@@ -2905,7 +2898,6 @@ static inline void dequeue_entity_load_avg(struct cfs_rq *cfs_rq,
 void idle_enter_fair(struct rq *this_rq)
 {
 	update_rq_runnable_avg(this_rq, 1);
-	hp_event_update_rq_load(this_rq->cpu);
 }
 
 /*
@@ -2916,7 +2908,6 @@ void idle_enter_fair(struct rq *this_rq)
 void idle_exit_fair(struct rq *this_rq)
 {
 	update_rq_runnable_avg(this_rq, 0);
-	hp_event_update_rq_load(this_rq->cpu);
 }
 
 static int idle_balance(struct rq *this_rq);
@@ -2987,6 +2978,7 @@ static void enqueue_sleeper(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			}
 
 			trace_sched_stat_blocked(tsk, delta);
+			trace_sched_blocked_reason(tsk);
 
 			/*
 			 * Blocking time is in units of nanosecs, so shift by
@@ -3078,10 +3070,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	check_spread(cfs_rq, se);
 	if (se != cfs_rq->curr)
 		__enqueue_entity(cfs_rq, se);
-
 	se->on_rq = 1;
-
-	hp_event_enqueue_entity(se, flags);
 
 	if (cfs_rq->nr_running == 1) {
 		list_add_leaf_cfs_rq(cfs_rq);
@@ -3164,9 +3153,6 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, se);
 	se->on_rq = 0;
-
-	hp_event_dequeue_entity(se, flags);
-
 	account_entity_dequeue(cfs_rq, se);
 
 	/*
@@ -4951,11 +4937,14 @@ static inline int hmp_boost(void)
 {
 	u64 now = ktime_to_us(ktime_get());
 	int ret;
+	unsigned long flags;
 
+	raw_spin_lock_irqsave(&hmp_boost_lock, flags);
 	if (hmp_boost_val || now < hmp_boostpulse_endtime)
 		ret = 1;
 	else
 		ret = 0;
+	raw_spin_unlock_irqrestore(&hmp_boost_lock, flags);
 
 	return ret;
 }
@@ -5004,11 +4993,7 @@ static inline struct hmp_domain *hmp_faster_domain(int cpu)
 {
 	struct list_head *pos;
 
-	if (hmp_cpu_is_fastest(cpu))
-		return hmp_cpu_domain(cpu);
-
 	pos = &hmp_cpu_domain(cpu)->hmp_domains;
-
 	return list_entry(pos->prev, struct hmp_domain, hmp_domains);
 }
 
@@ -5119,18 +5104,6 @@ static u64 hmp_variable_scale_convert(u64 delta)
 		low *= hmp_data.multiplier;
 		high *= hmp_data.multiplier;
 	}
-	return (low >> HMP_VARIABLE_SCALE_SHIFT)
-			+ (high << (32ULL - HMP_VARIABLE_SCALE_SHIFT));
-}
-
-static u64 hmp_rq_variable_scale_convert(u64 delta)
-{
-	u64 high = delta >> 32ULL;
-	u64 low = delta & 0xffffffffULL;
-
-	low *= hmp_data.rq_multiplier;
-	high *= hmp_data.rq_multiplier;
-
 	return (low >> HMP_VARIABLE_SCALE_SHIFT)
 			+ (high << (32ULL - HMP_VARIABLE_SCALE_SHIFT));
 }
@@ -5593,34 +5566,6 @@ static inline unsigned int hmp_domain_min_load(struct hmp_domain *hmpd,
 		*min_cpu = min_cpu_runnable_temp;
 
 	return min_runnable_load;
-}
-
-#define RQ_IDLE_PERIOD	NSEC_PER_SEC / HZ
-
-static unsigned long __maybe_unused hmp_domain_sum_load(struct hmp_domain *hmpd)
-{
-	int cpu;
-	unsigned long sum = 0;
-	unsigned long load;
-
-	for_each_cpu_mask(cpu, hmpd->cpus) {
-		load = cpu_rq(cpu)->sysload_avg_ratio;
-		sum += load;
-	}
-
-	return sum;
-}
-
-static inline unsigned int __maybe_unused hmp_domain_nr_running(struct hmp_domain *hmpd)
-{
-	int cpu;
-	unsigned int nr = 0;
-
-	for_each_cpu_mask(cpu, hmpd->cpus) {
-		nr += cpu_rq(cpu)->cfs.h_nr_running;
-	}
-
-	return nr;
 }
 
 /*
@@ -6353,17 +6298,20 @@ struct lb_env {
 	struct list_head	tasks;
 };
 
+#ifdef CONFIG_SCHED_HMP
 /*
  * move_task - move a task from one runqueue to another runqueue.
  * Both runqueues must be locked.
  */
-static void move_task(struct task_struct *p, struct lb_env *env)
+static void __maybe_unused move_task(struct task_struct *p, struct lb_env *env)
 {
 	deactivate_task(env->src_rq, p, 0);
 	set_task_cpu(p, env->dst_cpu);
 	activate_task(env->dst_rq, p, 0);
 	check_preempt_curr(env->dst_rq, p, 0);
 }
+#endif
+
 /*
  * Is this task likely cache-hot:
  */
@@ -8946,10 +8894,6 @@ static int hmp_active_task_migration_cpu_stop(void *data)
 	struct sched_domain *sd;
 
 	raw_spin_lock_irq(&busiest_rq->lock);
-
-	if (p->exit_state)
-		goto out_unlock;
-
 	/* make sure the requested cpu hasn't gone down in the meantime */
 	if (unlikely(busiest_cpu != smp_processor_id() ||
 		!busiest_rq->active_balance)) {
@@ -9027,9 +8971,6 @@ static int hmp_idle_pull_cpu_stop(void *data)
 	struct sched_domain *sd;
 
 	raw_spin_lock_irq(&busiest_rq->lock);
-
-	if (p->exit_state)
-		goto out_unlock;
 
 	/* make sure the requested cpu hasn't gone down in the meantime */
 	if (unlikely(busiest_cpu != smp_processor_id() ||
@@ -9130,6 +9071,7 @@ static void hmp_force_up_migration(int this_cpu)
 		}
 		orig = curr;
 		curr = hmp_get_heaviest_task(curr, 1);
+
 		p = task_of(curr);
 		if (hmp_up_migration(cpu, &target_cpu, curr)) {
 			if (!target->active_balance) {
@@ -9143,7 +9085,6 @@ static void hmp_force_up_migration(int this_cpu)
 				hmp_next_up_delay(&p->se, target->push_cpu);
 			}
 		}
-
 		if (!force && !target->active_balance) {
 			/*
 			 * For now we just check the currently running task.
@@ -9169,9 +9110,7 @@ static void hmp_force_up_migration(int this_cpu)
 				hmp_active_task_migration_cpu_stop,
 				target, &target->active_balance_work);
 	}
-
 	spin_unlock(&hmp_force_migration);
-
 	//trace_printk("spinlock RELEASE cpu %d\n", this_cpu);
 }
 #else
@@ -9235,12 +9174,9 @@ static unsigned int hmp_idle_pull(int this_cpu)
 
 		if (hmp_boost() || curr->avg.load_avg_ratio > up_threshold)
 			if (curr->avg.load_avg_ratio > ratio) {
-				if (p)
-					put_task_struct(p);
 				p = task_of(curr);
 				target = rq;
 				ratio = curr->avg.load_avg_ratio;
-				get_task_struct(p);
 			}
 		raw_spin_unlock_irqrestore(&rq->lock, flags);
 	}
@@ -9251,6 +9187,7 @@ static unsigned int hmp_idle_pull(int this_cpu)
 	/* now we have a candidate */
 	raw_spin_lock_irqsave(&target->lock, flags);
 	if (!target->active_balance && task_rq(p) == target) {
+		get_task_struct(p);
 		target->active_balance = 1;
 		target->push_cpu = this_cpu;
 		target->migrate_task = p;
@@ -9258,8 +9195,6 @@ static unsigned int hmp_idle_pull(int this_cpu)
 		trace_sched_hmp_migrate(p, target->push_cpu,
 			HMP_MIGRATE_IDLE_PULL);
 		hmp_next_up_delay(&p->se, target->push_cpu);
-	} else {
-		put_task_struct(p);
 	}
 	raw_spin_unlock_irqrestore(&target->lock, flags);
 	if (force) {
@@ -9354,7 +9289,6 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		task_tick_numa(rq, curr);
 
 	update_rq_runnable_avg(rq, 1);
-	hp_event_update_rq_load(rq->cpu);
 }
 
 /*
@@ -9463,7 +9397,6 @@ static void switched_from_fair(struct rq *rq, struct task_struct *p)
 		subtract_blocked_load_contrib(cfs_rq, se->avg.load_avg_contrib);
 	}
 #endif
-	hp_event_switched_from(se);
 }
 
 /*
@@ -9975,7 +9908,7 @@ static int __init register_sched_cpufreq_notifier(void)
 		/* safe defaults */
 		freq_scale[ret].cpufreq_max = 1024;
 		freq_scale[ret].cpufreq_min = 1024;
-		freq_scale[ret].thermal_max = UINT_MAX;
+		freq_scale[ret].thermal_max = 1024;
 		freq_scale[ret].thermal_min = 0;
 		freq_scale[ret].curr_scale = 1024;
 
@@ -10041,399 +9974,3 @@ static int __init hmp_param_init(void)
 }
 pure_initcall(hmp_param_init);
 #endif
-
-#ifdef CONFIG_SCHED_HP_EVENT
-#include <soc/samsung/exynos-cpu_hotplug.h>
-
-#if defined(CONFIG_HP_EVENT_THREAD_GROUP)
-/* should be called with thread_group_lock acquired */
-static void update_boost_request(struct sched_entity *se)
-{
-	struct task_struct *group_leader = task_of(se)->group_leader;
-	int level = hpgov_default_level();
-
-	if (group_leader->thread_group_load >= (hmp_up_threshold * (level + 1))
-			&& group_leader->nr_thread_group >= level + 1) {
-		if (!group_leader->hp_boost_requested) {
-			group_leader->hp_boost_requested = true;
-			inc_boost_req_count();
-		}
-	} else {
-		if (group_leader->hp_boost_requested) {
-			group_leader->hp_boost_requested = false;
-			dec_boost_req_count(true);
-		}
-	}
-}
-
-static void add_thread_group_info(struct sched_entity *se)
-{
-
-	struct task_struct *group_leader = task_of(se)->group_leader;
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&group_leader->thread_group_lock, flags);
-	if (task_of(se)->member_of_group && !task_of(se)->applied_to_group_load) {
-		if (se->avg.load_avg_ratio >= hmp_down_threshold) {
-			group_leader->nr_thread_group++;
-			group_leader->thread_group_load += se->avg.load_avg_ratio;
-			task_of(se)->group_applied_load = se->avg.load_avg_ratio;
-			task_of(se)->applied_to_group_load = true;
-		}
-	}
-
-	trace_sched_hp_event_thread_group(group_leader, task_of(se), group_leader->thread_group_load, group_leader->nr_thread_group, se->avg.load_avg_ratio, "enqueue");
-
-	update_boost_request(se);
-	raw_spin_unlock_irqrestore(&group_leader->thread_group_lock, flags);
-}
-
-static void sub_thread_group_info(struct sched_entity *se)
-{
-	struct task_struct *group_leader = task_of(se)->group_leader;
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&group_leader->thread_group_lock, flags);
-	if (task_of(se)->applied_to_group_load) {
-		group_leader->nr_thread_group--;
-		group_leader->thread_group_load -= task_of(se)->group_applied_load;
-		task_of(se)->applied_to_group_load = false;
-	}
-
-	trace_sched_hp_event_thread_group(group_leader, task_of(se), group_leader->thread_group_load, group_leader->nr_thread_group, se->avg.load_avg_ratio, "dequeue");
-
-	update_boost_request(se);
-	raw_spin_unlock_irqrestore(&group_leader->thread_group_lock, flags);
-}
-
-static void update_thread_group_info(struct sched_entity *se)
-{
-	struct task_struct *group_leader = task_of(se)->group_leader;
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&group_leader->thread_group_lock, flags);
-	if (task_of(se)->applied_to_group_load) {
-		if (se->avg.load_avg_ratio >= hmp_down_threshold) {
-			group_leader->thread_group_load += se->avg.load_avg_ratio
-						- task_of(se)->group_applied_load;
-			task_of(se)->group_applied_load = se->avg.load_avg_ratio;
-		} else {
-			group_leader->nr_thread_group--;
-			group_leader->thread_group_load -= task_of(se)->group_applied_load;
-			task_of(se)->applied_to_group_load = false;
-		}
-	} else {
-		if (se->avg.load_avg_ratio >= hmp_down_threshold) {
-			group_leader->nr_thread_group++;
-			group_leader->thread_group_load += se->avg.load_avg_ratio;
-			task_of(se)->group_applied_load = se->avg.load_avg_ratio;
-			task_of(se)->applied_to_group_load = true;
-			task_of(se)->member_of_group = true;
-		}
-	}
-	trace_sched_hp_event_thread_group(group_leader, task_of(se), group_leader->thread_group_load, group_leader->nr_thread_group, se->avg.load_avg_ratio, "update");
-
-	update_boost_request(se);
-	raw_spin_unlock_irqrestore(&group_leader->thread_group_lock, flags);
-}
-
-static void exit_thread_group_info(struct sched_entity *se)
-{
-	struct task_struct *group_leader = task_of(se)->group_leader;
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&group_leader->thread_group_lock, flags);
-
-	if (task_of(se)->applied_to_group_load) {
-		group_leader->nr_thread_group--;
-		group_leader->thread_group_load -= task_of(se)->group_applied_load;
-		task_of(se)->applied_to_group_load = false;
-	}
-
-	trace_sched_hp_event_thread_group(group_leader, task_of(se), group_leader->thread_group_load, group_leader->nr_thread_group, se->avg.load_avg_ratio, "exit");
-
-	update_boost_request(se);
-	raw_spin_unlock_irqrestore(&group_leader->thread_group_lock, flags);
-}
-#else /* CONFIG_HP_EVENT_THREAD_GROUP */
-static inline void add_thread_group_info(struct sched_entity *se) { };
-static inline void sub_thread_group_info(struct sched_entity *se) { };
-static inline void update_thread_group_info(struct sched_entity *se) { };
-static inline void exit_thread_group_info(struct sched_entity *se) { };
-#endif
-
-#if defined(CONFIG_HP_EVENT_HMP_SYSTEM_LOAD)
-#include <soc/samsung/cpufreq.h>
-extern int get_real_max_freq(cluster_type cluster);
-
-enum {
-	BIG_IDLE	= 0,
-	BIG_THROTTLED	= 1,
-};
-static int hmp_big_status = BIG_IDLE;
-static atomic_t hmp_num_big_threads;
-DEFINE_RAW_SPINLOCK(sysload_lock);
-
-int hp_sysload_to_quad_ratio = 100;
-int hp_sysload_to_dual_ratio = 80;
-int hp_little_multiplier_ratio = 100;
-
-static unsigned long big_throttle_threshold;
-static unsigned long big_idle_threshold;
-static unsigned long big_multiplier;
-static unsigned long little_multiplier;
-static unsigned long thresh_precalc;
-static unsigned long little_mul_precalc;
-
-int hp_sysload_param_calc(void)
-{
-	big_throttle_threshold = thresh_precalc * hp_sysload_to_quad_ratio;
-	big_idle_threshold = thresh_precalc * hp_sysload_to_dual_ratio;
-	little_multiplier = little_mul_precalc * hp_little_multiplier_ratio / 100;
-
-	return 0;
-}
-
-static int __init hp_sysload_param_init(void)
-{
-	unsigned int lit_cpu_efficiency = pcpu_efficiency[0];
-	unsigned int big_cpu_efficiency = pcpu_efficiency[cpumask_weight(&hmp_slow_cpu_mask)];
-
-	thresh_precalc = (hpgov_default_level() * get_real_max_freq(CL_ONE) >> (SCHED_FREQSCALE_SHIFT + 1)) * big_cpu_efficiency / 100;
-	big_multiplier = ((get_real_max_freq(CL_ONE) >> SCHED_FREQSCALE_SHIFT) * big_cpu_efficiency) >> SCHED_FREQSCALE_SHIFT;
-	little_mul_precalc = ((get_real_max_freq(CL_ZERO) >> SCHED_FREQSCALE_SHIFT) * lit_cpu_efficiency) >> SCHED_FREQSCALE_SHIFT;
-
-	hp_sysload_param_calc();
-
-	return 0;
-}
-late_initcall(hp_sysload_param_init);
-
-static inline unsigned long sysload_sum(unsigned long big_load, unsigned long little_load)
-{
-	return big_load * big_multiplier + little_load * little_multiplier;
-}
-
-static bool is_big_throttled(unsigned long threshold)
-{
-	int cpu;
-	unsigned long big_sum = 0;
-	unsigned long little_sum = 0;
-	unsigned long load;
-
-	for_each_cpu_mask(cpu, hmp_faster_domain(0)->cpus) {
-		if (idle_cpu(cpu) && cpu_rq(cpu)->idle_stamp != 0 &&
-			sched_clock_cpu(raw_smp_processor_id())
-			- cpu_rq(cpu)->idle_stamp > RQ_IDLE_PERIOD)
-			load = 0;
-		else
-			load = cpu_rq(cpu)->sysload_avg_ratio;
-
-		/* FIXME: do not hard-code "2" */
-		if (load == 0 || load * big_multiplier < (threshold >> 2)) {
-			trace_sched_hp_event_system_load(cpu,
-			load * big_multiplier, threshold >> 2, "core not throttled");
-			return false;
-		} else {
-			big_sum += load;
-		}
-	}
-
-	if (hmp_boost()) {
-		little_sum = hmp_domain_sum_load(hmp_cpu_domain(0));
-		trace_sched_hp_event_system_load(raw_smp_processor_id(),
-					little_sum, -1, "little load");
-	} else if (atomic_read(&hmp_num_big_threads) <= hpgov_default_level()) {
-		return false;
-	} else {
-		trace_sched_hp_event_system_load(raw_smp_processor_id(),
-				atomic_read(&hmp_num_big_threads), -1,
-				"big threads count");
-	}
-
-	if (sysload_sum(big_sum, little_sum) > threshold) {
-		trace_sched_hp_event_system_load(raw_smp_processor_id(),
-				big_sum, threshold, "throttled");
-		return true;
-	}
-
-	return false;
-}
-
-static bool is_big_idle(unsigned long threshold)
-{
-	int cpu;
-	int idle_cnt = 0;
-	unsigned long big_sum = 0;
-	unsigned long little_sum = 0;
-	unsigned long load;
-
-	if (atomic_read(&hmp_num_big_threads) > hpgov_default_level()) {
-		trace_sched_hp_event_system_load(raw_smp_processor_id(),
-				atomic_read(&hmp_num_big_threads), -1,
-				"big threads count/not idle");
-		return false;
-	}
-
-	for_each_cpu_mask(cpu, hmp_faster_domain(0)->cpus) {
-		if (idle_cpu(cpu) && cpu_rq(cpu)->idle_stamp != 0 &&
-			sched_clock_cpu(raw_smp_processor_id())
-			- cpu_rq(cpu)->idle_stamp > RQ_IDLE_PERIOD)
-			load = 0;
-		else
-			load = cpu_rq(cpu)->sysload_avg_ratio;
-
-		if (load == 0)
-			idle_cnt++;
-		else
-			big_sum += load;
-	}
-
-	if (idle_cnt >= cpumask_weight(&hmp_faster_domain(0)->cpus) -
-			hpgov_default_level())
-		return true;
-
-#if 0
-	if (hmp_boost()) {
-		little_sum = hmp_domain_sum_load(hmp_cpu_domain(0));
-		trace_sched_hp_event_system_load(raw_smp_processor_id(),
-					little_load, -1, "little load");
-	}
-#endif
-
-	if (sysload_sum(big_sum, little_sum) < threshold) {
-		trace_sched_hp_event_system_load(raw_smp_processor_id(),
-				big_sum, threshold, "idle");
-		return true;
-	}
-
-	return false;
-}
-
-static void update_sysload_info(int cpu)
-{
-	unsigned long flags;
-	u32 contrib;
-	struct rq *rq = cpu_rq(cpu);
-
-	if (cpumask_weight(&hmp_faster_domain(0)->cpus) == 0)
-		return;
-
-	contrib = rq->avg.runnable_avg_sum * scale_load_down(NICE_0_LOAD);
-	contrib /= (rq->avg.runnable_avg_period + 1);
-	rq->sysload_avg_ratio = scale_load(contrib);
-
-	trace_sched_rq_sysload_ratio(cpu, rq->sysload_avg_ratio);
-
-	if (hmp_cpu_is_slowest(cpu))
-		return;
-
-	if (!raw_spin_trylock_irqsave(&sysload_lock, flags))
-		return;
-
-	switch(hmp_big_status) {
-	case BIG_IDLE:
-		if (is_big_throttled(big_throttle_threshold)) {
-			inc_boost_req_count();
-			hmp_big_status = BIG_THROTTLED;
-		}
-		break;
-	case BIG_THROTTLED:
-		if (cpumask_weight(&hmp_faster_domain(0)->cpus) !=
-			cpumask_weight(&hmp_faster_domain(0)->possible_cpus))
-			break;
-
-		if (is_big_idle(big_idle_threshold)) {
-			dec_boost_req_count(true);
-			hmp_big_status = BIG_IDLE;
-		}
-
-		break;
-	}
-
-	raw_spin_unlock_irqrestore(&sysload_lock, flags);
-}
-
-static bool inline tsk_cpus_big_allowed(struct task_struct *p)
-{
-	return cpumask_intersects(&p->cpus_allowed, &hmp_fast_cpu_mask);
-}
-
-static void update_big_threads_info(struct sched_entity *se)
-{
-	if (ktime_get_ns() < task_of(se)->start_time + TICK_NSEC)
-		return;
-
-	if (se->avg.load_avg_ratio > hmp_up_threshold) {
-		if (!se->avg.is_big_thread && tsk_cpus_big_allowed(task_of(se))) {
-			se->avg.is_big_thread = true;
-			atomic_inc(&hmp_num_big_threads);
-		}
-	} else {
-		if (se->avg.is_big_thread) {
-			se->avg.is_big_thread = false;
-			atomic_dec(&hmp_num_big_threads);
-		}
-	}
-}
-
-static void sub_big_threads_info(struct sched_entity *se)
-{
-	if (se->avg.is_big_thread) {
-		se->avg.is_big_thread = false;
-		atomic_dec(&hmp_num_big_threads);
-	}
-}
-#else /* CONFIG_HP_EVENT_HMP_SYSTEM_LOAD */
-static inline void update_sysload_info(int cpu) { };
-static inline void update_big_threads_info(struct sched_entity *se) { };
-static inline void sub_big_threads_info(struct sched_entity *se) { };
-static inline void exit_big_threads_info(struct sched_entity *se) { };
-#endif
-
-#if defined(CONFIG_HP_EVENT_THREAD_GROUP) || defined(CONFIG_HP_EVENT_HMP_SYSTEM_LOAD)
-void hp_event_enqueue_entity(struct sched_entity *se, int flags)
-{
-	if (flags & ENQUEUE_WAKEUP && entity_is_task(se)
-		&& !task_of(se)->exit_state) {
-		add_thread_group_info(se);
-		update_big_threads_info(se);
-	}
-}
-
-void hp_event_dequeue_entity(struct sched_entity *se, int flags)
-{
-	if (flags & DEQUEUE_SLEEP && entity_is_task(se)
-		&& !task_of(se)->exit_state) {
-		sub_thread_group_info(se);
-		sub_big_threads_info(se);
-	}
-}
-
-void hp_event_update_entity_load(struct sched_entity *se)
-{
-	 if (entity_is_task(se) && se->on_rq
-		&& !task_of(se)->exit_state) {
-		 update_thread_group_info(se);
-		 update_big_threads_info(se);
-	 }
-}
-
-void hp_event_update_rq_load(int cpu)
-{
-	update_sysload_info(cpu);
-}
-
-void hp_event_do_exit(struct task_struct *p)
-{
-	exit_thread_group_info(&p->se);
-	sub_big_threads_info(&p->se);
-}
-
-void hp_event_switched_from(struct sched_entity *se)
-{
-	exit_thread_group_info(se);
-	sub_big_threads_info(se);
-}
-#endif
-#endif /* CONFIG_SCHED_HP_EVENT */

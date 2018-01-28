@@ -16,7 +16,7 @@
 #include <linux/err.h>
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
-#include <linux/pinctrl/pinctrl-samsung.h>
+#include <../drivers/pinctrl/samsung/pinctrl-samsung.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
@@ -26,13 +26,10 @@
 #include <linux/regulator/of_regulator.h>
 #include <linux/mfd/samsung/core.h>
 #include <linux/mfd/samsung/s2mps16.h>
-#include <mach/regs-pmu.h>
-#include <mach/asv-exynos.h>
 #include <linux/io.h>
 #include <linux/mutex.h>
 #include <linux/exynos-ss.h>
-
-#include "internal.h"
+#include <trace/events/exynos.h>
 
 #include <soc/samsung/exynos-pmu.h>
 #if defined(CONFIG_PWRCAL)
@@ -50,7 +47,6 @@
 #define G3D_DVS_CTRL                   (0x1 << 1)
 #define G3D_DVS_STATUS                 (0x1)
 #define LOCAL_PWR_CFG                  (0xF << 0)
-#define BUCK2_ASV_MAX		       (1300000)
 
 static struct s2mps16_info *static_info;
 static struct regulator_desc regulators[][S2MPS16_REGULATOR_MAX];
@@ -58,13 +54,13 @@ static struct regulator_desc regulators[][S2MPS16_REGULATOR_MAX];
 struct s2mps16_info {
 	struct regulator_dev *rdev[S2MPS16_REGULATOR_MAX];
 	unsigned int opmode[S2MPS16_REGULATOR_MAX];
+	unsigned int vsel_value[S2MPS16_REGULATOR_MAX];
 	int num_regulators;
 	bool dvs_en;
 	struct sec_pmic_dev *iodev;
 	bool g3d_en;
+	bool cache_data;
 	int dvs_pin;
-	const char *g3d_en_addr;
-	const char *g3d_en_pin;
 	struct mutex lock;
 	bool g3d_ocp;
 	bool buck11_en;
@@ -152,8 +148,8 @@ static int s2m_is_enabled_regmap(struct regulator_dev *rdev)
 
 	/* BUCK6 is controlled by g3d gpio */
 	if (reg_id == S2MPS16_BUCK6 && s2mps16->g3d_en) {
-		if ((__raw_readl(EXYNOS_PMU_G3D_STATUS) &
-					LOCAL_PWR_CFG) == LOCAL_PWR_CFG)
+		exynos_pmu_read(EXYNOS_PMU_G3D_STATUS, &val);
+		if ((val & LOCAL_PWR_CFG) == LOCAL_PWR_CFG)
 			return 1;
 		else
 			return 0;
@@ -238,6 +234,9 @@ static int s2m_get_voltage_sel_regmap(struct regulator_dev *rdev)
 		ret = sec_reg_read(s2mps16->iodev, S2MPS16_REG_B6CTRL2, &val);
 		if (ret)
 			return ret;
+	} else if ((reg_id >= S2MPS16_BUCK1 && reg_id <= S2MPS16_BUCK5)
+			&& s2mps16->vsel_value[reg_id] && s2mps16->cache_data) {
+		return s2mps16->vsel_value[reg_id];
 	} else {
 		ret = sec_reg_read(s2mps16->iodev, rdev->desc->vsel_reg, &val);
 		if (ret)
@@ -252,7 +251,16 @@ static int s2m_get_voltage_sel_regmap(struct regulator_dev *rdev)
 static int s2m_set_voltage_sel_regmap(struct regulator_dev *rdev, unsigned sel)
 {
 	struct s2mps16_info *s2mps16 = rdev_get_drvdata(rdev);
+	int reg_id = rdev_get_id(rdev);
 	int ret;
+	char name[16];
+	unsigned int voltage;
+
+	/* voltage information logging to snapshot feature */
+	snprintf(name, sizeof(name), "LDO%d", (reg_id - S2MPS16_LDO1) + 1);
+	voltage = ((sel & rdev->desc->vsel_mask) * S2MPS16_LDO_STEP2) + S2MPS16_LDO_MIN1;
+	exynos_ss_regulator(name, rdev->desc->vsel_reg, voltage, ESS_FLAG_IN);
+	trace_exynos_regulator_in(name, rdev, voltage);
 
 	ret = sec_reg_update(s2mps16->iodev, rdev->desc->vsel_reg,
 				  sel, rdev->desc->vsel_mask);
@@ -263,9 +271,14 @@ static int s2m_set_voltage_sel_regmap(struct regulator_dev *rdev, unsigned sel)
 		ret = sec_reg_update(s2mps16->iodev, rdev->desc->apply_reg,
 					 rdev->desc->apply_bit,
 					 rdev->desc->apply_bit);
+	exynos_ss_regulator(name, rdev->desc->vsel_reg, voltage, ESS_FLAG_OUT);
+	trace_exynos_regulator_out(name, rdev, voltage);
+
 	return ret;
 out:
 	pr_warn("%s: failed to set voltage_sel_regmap\n", rdev->desc->name);
+	exynos_ss_regulator(name, rdev->desc->vsel_reg, voltage, ESS_FLAG_ON);
+	trace_exynos_regulator_on(name, rdev, voltage);
 	return ret;
 }
 
@@ -276,69 +289,19 @@ static int s2m_set_voltage_sel_regmap_buck(struct regulator_dev *rdev,
 	int ret;
 	struct s2mps16_info *s2mps16 = rdev_get_drvdata(rdev);
 	int reg_id = rdev_get_id(rdev);
+	unsigned int voltage;
+	char name[16];
 
 	/* If dvs_en = 0, dvs_pin = 1, occur BUG_ON */
 	if (reg_id == S2MPS16_BUCK6
 		&& !s2mps16->dvs_en && gpio_is_valid(s2mps16->dvs_pin)) {
 		BUG_ON(s2m_get_dvs_is_on());
 	}
-
 	/* voltage information logging to snapshot feature */
 	snprintf(name, sizeof(name), "BUCK%d", (reg_id - S2MPS16_BUCK1) + 1);
-	if (reg_id == S2MPS16_BUCK8 || reg_id == S2MPS16_BUCK9){
-		voltage = (sel * S2MPS16_BUCK_STEP2) + S2MPS16_BUCK_MIN2;
-		dev_info(&rdev->dev, ":BUCK%d 	voltage :%d	\n",
-				(reg_id - S2MPS16_BUCK1) + 1, voltage);
-	}
-	else
-		voltage = (sel * S2MPS16_BUCK_STEP1) + S2MPS16_BUCK_MIN1;
+	voltage = (sel * S2MPS16_BUCK_STEP1) + S2MPS16_BUCK_MIN1;
 	exynos_ss_regulator(name, rdev->desc->vsel_reg, voltage, ESS_FLAG_IN);
-
-	/* BUCK2 Control */
-	if (reg_id == S2MPS16_BUCK2 && s2mps16->buck_dvs_on) {
-		mutex_lock(&s2mps16->lock);
-
-		if (s2mps16->buck2_dvs == 0)
-			delta_val = 100000;
-		else if (s2mps16->buck2_dvs == 1)
-			delta_val = 0;
-		else if (s2mps16->buck2_dvs == 2)
-			delta_val = 75000;
-		else if (s2mps16->buck2_dvs == 3)
-			delta_val = 50000;
-
-		buck2_set_val = rdev->desc->min_uV + (rdev->desc->uV_step * sel);
-
-		if (delta_val + buck2_set_val <= BUCK2_ASV_MAX) {
-			if (!s2mps16->buck2_sync) {
-				ret = s2m_set_fix_ldo_voltage(rdev, 1);
-				if (ret < 0)
-					goto out;
-			}
-		} else {
-			if (s2mps16->buck2_sync) {
-				ret = s2m_set_fix_ldo_voltage(rdev, 0);
-				if (ret < 0)
-					goto out;
-			}
-		}
-
-		ret = sec_reg_write(s2mps16->iodev, rdev->desc->vsel_reg, sel);
-		if (ret < 0)
-			goto out;
-
-		mutex_unlock(&s2mps16->lock);
-		return ret;
-	}
-
-	if ((reg_id == S2MPS16_BUCK4 || reg_id == S2MPS16_BUCK5) && s2mps16->buck_dvs_on) {
-		mutex_lock(&s2mps16->lock);
-		ret = s2m_set_max_int_voltage(rdev, sel);
-		if (ret < 0)
-			goto out;
-		mutex_unlock(&s2mps16->lock);
-		return ret;
-	}
+	trace_exynos_regulator_in(name, rdev, voltage);
 
 	if (reg_id == S2MPS16_BUCK1 || reg_id == S2MPS16_BUCK2 ||
 		reg_id == S2MPS16_BUCK3 || reg_id == S2MPS16_BUCK4 ||
@@ -353,10 +316,15 @@ static int s2m_set_voltage_sel_regmap_buck(struct regulator_dev *rdev,
 		ret = sec_reg_update(s2mps16->iodev, rdev->desc->apply_reg,
 					 rdev->desc->apply_bit,
 					 rdev->desc->apply_bit);
+	exynos_ss_regulator(name, rdev->desc->vsel_reg, voltage, ESS_FLAG_OUT);
+	trace_exynos_regulator_out(name, rdev, voltage);
+
 	return ret;
 
 i2c_out:
 	pr_warn("%s: failed to set voltage_sel_regmap\n", rdev->desc->name);
+	exynos_ss_regulator(name, rdev->desc->vsel_reg, voltage, ESS_FLAG_ON);
+	trace_exynos_regulator_on(name, rdev, voltage);
 	return ret;
 }
 
@@ -390,21 +358,6 @@ static int s2m_set_voltage_time_sel(struct regulator_dev *rdev,
 	return 0;
 }
 
-int s2m_set_vth(struct regulator *reg, bool enable)
-{
-	struct regulator_dev *rdev = reg->rdev;
-	struct s2mps16_info *s2mps16 = rdev_get_drvdata(rdev);
-	int ret;
-
-	if(enable)
-		ret = sec_reg_update(s2mps16->iodev, S2MPS16_REG_VTH_OFFSET, S2MPS16_UP_VTH, 0xFF);
-	else
-		ret = sec_reg_update(s2mps16->iodev, S2MPS16_REG_VTH_OFFSET, S2MPS16_DOWN_VTH, 0xFF);
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(s2m_set_vth);
-
 void s2m_init_dvs()
 {
 	if (cal_dfs_ext_ctrl(dvfs_g3d, cal_dfs_dvs, 2) != 0) {
@@ -414,13 +367,18 @@ void s2m_init_dvs()
 
 int s2m_get_dvs_is_enable()
 {
-	return (__raw_readl(EXYNOS_PMU_GPU_DVS_CTRL) & G3D_DVS_CTRL);
+	unsigned int val;
+
+	exynos_pmu_read(EXYNOS_PMU_GPU_DVS_CTRL, &val);
+	return (val & G3D_DVS_CTRL);
 }
 EXPORT_SYMBOL_GPL(s2m_get_dvs_is_enable);
 
 int s2m_get_dvs_is_on()
 {
-	return !(__raw_readl(EXYNOS_PMU_GPU_DVS_STATUS) & G3D_DVS_STATUS);
+	unsigned int val;
+	exynos_pmu_read(EXYNOS_PMU_GPU_DVS_STATUS, &val);
+	return !(val & G3D_DVS_STATUS);
 }
 EXPORT_SYMBOL_GPL(s2m_get_dvs_is_on);
 
@@ -434,13 +392,13 @@ int s2m_set_dvs_pin(bool gpio_val)
 
 	/* wait for 90us, 100us when dvs pin control */
 	if (gpio_val) {
-		temp = __raw_readl(EXYNOS_PMU_GPU_DVS_CTRL);
-		__raw_writel(temp | G3D_DVS_CTRL_ON, EXYNOS_PMU_GPU_DVS_CTRL);
+		exynos_pmu_read(EXYNOS_PMU_GPU_DVS_CTRL, &temp);
+		exynos_pmu_write(EXYNOS_PMU_GPU_DVS_CTRL, temp | G3D_DVS_CTRL_ON);
 		udelay(90);
 	} else {
-		temp = __raw_readl(EXYNOS_PMU_GPU_DVS_CTRL);
-		__raw_writel((temp & ~G3D_DVS_CTRL) | G3D_DVS_CTRL_OFF,
-						EXYNOS_PMU_GPU_DVS_CTRL);
+		exynos_pmu_read(EXYNOS_PMU_GPU_DVS_CTRL, &temp);
+		exynos_pmu_write(EXYNOS_PMU_GPU_DVS_CTRL,
+				(temp & ~G3D_DVS_CTRL) | G3D_DVS_CTRL_OFF);
 		do {
 			udelay(100);
 			if (count > 3) {
@@ -448,7 +406,7 @@ int s2m_set_dvs_pin(bool gpio_val)
 								__func__);
 				return -EINVAL;
 			}
-			temp = __raw_readl(EXYNOS_PMU_GPU_DVS_STATUS);
+			exynos_pmu_read(EXYNOS_PMU_GPU_DVS_STATUS, &temp);
 			count++;
 		} while (!(temp & G3D_DVS_STATUS));
 	}
@@ -456,16 +414,6 @@ int s2m_set_dvs_pin(bool gpio_val)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(s2m_set_dvs_pin);
-
-void g3d_pin_config_set()
-{
-	if (!static_info->g3d_en)
-		return;
-
-	pin_config_set(static_info->g3d_en_addr, static_info->g3d_en_pin,
-					PINCFG_PACK(PINCFG_TYPE_FUNC, 2));
-}
-EXPORT_SYMBOL_GPL(g3d_pin_config_set);
 
 static struct regulator_ops s2mps16_ldo_ops = {
 	.list_voltage		= regulator_list_voltage_linear,
@@ -645,6 +593,11 @@ static int s2mps16_pmic_dt_parse_pdata(struct sec_pmic_dev *iodev,
 	pdata->smpl_warn = of_get_gpio(pmic_np, 0);
 	pdata->dvs_pin = of_get_gpio(pmic_np, 1);
 
+	ret = of_property_read_u32(pmic_np, "cache_data", &val);
+	if (ret)
+		return -EINVAL;
+	pdata->cache_data = !!val;
+
 	ret = of_property_read_u32(pmic_np, "g3d_en", &val);
 	if (ret)
 		return -EINVAL;
@@ -773,16 +726,13 @@ static int s2mps16_pmic_probe(struct platform_device *pdev)
 	s2mps16->iodev = iodev;
 	s2mps16->buck11_en = (const char *)of_find_property(iodev->dev->of_node,
 							"buck11_en", NULL);
-	s2mps16->g3d_en_pin = (const char *)of_get_property(iodev->dev->of_node,
-							"buck6en_pin", NULL);
-	s2mps16->g3d_en_addr = (const char *)of_get_property(
-			iodev->dev->of_node, "buck6en_addr", NULL);
 	mutex_init(&s2mps16->lock);
 
 	static_info = s2mps16;
 
 	s2mps16->dvs_en = pdata->dvs_en;
 	s2mps16->g3d_en = pdata->g3d_en;
+	s2mps16->cache_data = pdata->cache_data;
 
 	if (gpio_is_valid(pdata->dvs_pin)) {
 		ret = devm_gpio_request(&pdev->dev, pdata->dvs_pin,
@@ -797,7 +747,7 @@ static int s2mps16_pmic_probe(struct platform_device *pdev)
 			s2m_init_dvs();
 			s2mps16->dvs_pin = pdata->dvs_pin;
 		} else
-			dev_err(&pdev->dev, "dvs pin is not valid\n");
+			dev_err(&pdev->dev, "g3d dvs is not enabled.\n");
 	}
 
 	platform_set_drvdata(pdev, s2mps16);
@@ -827,7 +777,6 @@ static int s2mps16_pmic_probe(struct platform_device *pdev)
 
 
 	if (pdata->g3d_en) {
-		g3d_pin_config_set();
 		/* for buck6 gpio control, disable i2c control */
 		ret = sec_reg_update(iodev, S2MPS16_REG_B6CTRL1,
 				0x80, 0xC0);
@@ -888,12 +837,6 @@ static int s2mps16_pmic_probe(struct platform_device *pdev)
 	}
 
 	sec_reg_update(iodev, S2MPS16_REG_B4CTRL1, 0x00, 0x10);
-
-	ret = sec_reg_write(iodev, 0x9B, 0x10);
-	if (ret) {
-		dev_err(&pdev->dev, "BUCK8, BUCK9 DVS setting failed\n");
-		goto err;
-	}
 
 	/* On sequence Config for PWREN_MIF */
 	sec_reg_write(iodev, 0x70, 0xB4);	/* seq. Buck2, Buck1 */

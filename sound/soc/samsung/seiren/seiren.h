@@ -42,7 +42,6 @@
 #define PARAMS_CNT		(0x0060)
 #define PARAMS_VAL1		(0x0064)
 #define PARAMS_VAL2		(0x0068)
-#define LAST_CHECKPT		(0x006C)
 #define FW_LOG_VAL1		(0x0078)
 #define FW_LOG_VAL2		(0x007C)
 
@@ -124,7 +123,6 @@
 #define INSTANCE_MAX		(20)
 #ifdef CONFIG_SND_SAMSUNG_SEIREN_OFFLOAD
 #define SRAM_FW_MAX		(0x24000)
-#define SRAM_FW_MEMSET_SIZE	(0x22000)
 #else
 #define SRAM_FW_MAX		(0x3B000)
 #endif
@@ -366,8 +364,6 @@ struct seiren_info {
 	void __iomem	*effect_ram;
 	bool		effect_on;
 	unsigned int	out_sample_rate;
-	int		left_vol;
-	int		right_vol;
 #endif
 	bool		fx_ext_on;
 	unsigned char	*fx_work_buf;
@@ -437,7 +433,7 @@ struct audio_processor {
 };
 
 extern int esa_compr_set_param(struct audio_processor *ap, uint8_t **buffer);
-extern int esa_compr_open(void);
+extern void esa_compr_open(void);
 extern void esa_compr_close(void);
 extern int esa_compr_send_buffer(const size_t copy_size,
 					struct audio_processor *ap);

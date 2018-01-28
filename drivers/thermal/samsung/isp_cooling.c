@@ -310,7 +310,7 @@ int isp_set_cur_temp(bool suspended, unsigned long temp)
 {
 	enum tmu_noti_state_t tstate;
 
-	if (suspended || temp < EXYNOS_COLD_TEMP)
+	if (temp < EXYNOS_COLD_TEMP)
 		tstate = ISP_COLD;
 	else
 		tstate = ISP_NORMAL;

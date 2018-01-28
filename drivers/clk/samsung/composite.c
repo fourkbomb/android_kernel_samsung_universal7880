@@ -53,7 +53,7 @@ struct samsung_clk_reg_dump *samsung_clk_alloc_reg_dump(
 						unsigned long nr_rdump)
 {
 	struct samsung_clk_reg_dump *rd;
-	unsigned int i;
+	unsigned long i;
 
 	rd = kcalloc(nr_rdump, sizeof(*rd), GFP_KERNEL);
 	if (!rd)
@@ -70,20 +70,23 @@ struct samsung_clk_reg_dump *samsung_clk_alloc_reg_dump(
 struct samsung_clk_provider *__init samsung_clk_init(struct device_node *np,
 			void __iomem *base, unsigned long nr_clks)
 {
-	struct samsung_clk_provider *ctx = NULL;
+	struct samsung_clk_provider *ctx;
 	struct clk **clk_table;
 	int i;
 
 	if (!np)
-		return ctx;
+		return NULL;
 
 	ctx = kzalloc(sizeof(struct samsung_clk_provider), GFP_KERNEL);
 	if (!ctx)
 		panic("could not allocate clock provider context.\n");
 
-	clk_table = kzalloc(sizeof(struct clk *) * nr_clks, GFP_KERNEL);
+	clk_table = kcalloc(nr_clks, sizeof(struct clk *), GFP_KERNEL);
 	if (!clk_table)
 		panic("could not allocate clock lookup table\n");
+
+	for (i = 0; i < nr_clks; ++i)
+		clk_table[i] = ERR_PTR(-ENOENT);
 
 	ctx->reg_base = base;
 	ctx->clk_data.clks = clk_table;
@@ -775,7 +778,7 @@ void samsung_register_comp_pll(struct samsung_clk_provider *ctx,
 }
 
 /* operation functions for mux clocks */
-static u8 samsung_mux_get_parent(struct clk_hw *hw)
+static int samsung_mux_get_parent(struct clk_hw *hw)
 {
 	struct samsung_composite_mux *mux = to_comp_mux(hw);
 	u32 val;

@@ -76,6 +76,7 @@ config ARM64
 	select SPARSE_IRQ
 	select SYSCTL_EXCEPTION_TRACE
 	select HAVE_CONTEXT_TRACKING
+    select SECCOMP
 	help
 	  ARM 64-bit (AArch64) Linux support.
 
@@ -204,6 +205,53 @@ menu "Samsung Exynos"
 config ARCH_EXYNOS
 	bool
 
+config SAMSUNG_PRODUCT_SHIP
+	bool "set up for product shipping"
+	default n
+
+config SOC_EXYNOS7870
+	bool "Samsung EXYNOS7870"
+	select ARCH_EXYNOS
+	select ARCH_HAS_CPUFREQ
+	select HAVE_S3C2410_I2C if I2C
+	select HAVE_S3C2410_WATCHDOG if WATCHDOG
+	select HAVE_S3C_RTC if RTC_CLASS
+	select ARCH_SUPPORTS_MSI
+	select ARM_AMBA
+	select CLKSRC_OF
+	select USE_OF
+	select COMMON_CLK_SAMSUNG
+	select CLKSRC_EXYNOS_MCT
+	select PINCTRL
+	select PM_GENERIC_DOMAINS if PM
+	select SOC_SAMSUNG
+	select SAMSUNG_DMADEV
+
+config ARCH_EXYNOS7
+	bool "SAMSUNG EXYNOS7"
+	select HAVE_ARM_SCU if SMP
+	select HAVE_SMP
+	help
+	  Samsung EXYNOS7 (A57/A53) SoC based systems
+
+config SOC_EXYNOS7880
+	bool "Samsung EXYNOS7880"
+	select ARCH_EXYNOS
+	select ARCH_HAS_CPUFREQ
+	select HAVE_S3C2410_I2C if I2C
+	select HAVE_S3C2410_WATCHDOG if WATCHDOG
+	select HAVE_S3C_RTC if RTC_CLASS
+	select ARCH_SUPPORTS_MSI
+	select ARM_AMBA
+	select CLKSRC_OF
+	select USE_OF
+	select COMMON_CLK_SAMSUNG
+	select CLKSRC_EXYNOS_MCT
+	select PINCTRL
+	select SOC_SAMSUNG
+	select SAMSUNG_DMADEV
+	select PM_GENERIC_DOMAINS if PM
+
 config SOC_EXYNOS8890
 	bool "Samsung EXYNOS8890"
 	select ARCH_EXYNOS
@@ -219,8 +267,13 @@ config SOC_EXYNOS8890
 	select CLKSRC_EXYNOS_MCT
 	select PINCTRL
 	select PWRCAL
+	select PM_GENERIC_DOMAINS if PM
 	select SOC_SAMSUNG
 	select SAMSUNG_DMADEV
+
+config SOC_EXYNOS8890_EVT1
+	default n
+	bool "Samsung EXYNOS8890 evt1"
 
 config ARCH_EXYNOS8
 	bool "SAMSUNG EXYNOS8"
@@ -234,24 +287,17 @@ config PWRCAL
     help
     Support Power CAL for Exynos SoC.
 
-config ZONE_DMA_ALLOW_CUSTOM_SIZE
-	bool "Enable Platform-settable Custom Size for ZONE_DMA"
-	default n
-	depends on ZONE_DMA
+config ARM_TRUSTZONE
+	bool "Support TrustZone-enabled Trusted Execution Environment"
+	default y
 	help
-	  Select Y if you need to allow setting ZONE_DMA size for platform.
+	  Select if you want a kernel to be executed at non-secure world.
+	  This option should be used with related secure bootloader and
+	  TrustZone software.
 
-config ZONE_DMA_SIZE_MBYTES
-	int "ZONE_DMA Size in MBytes"
-	range 16 4096
-	default 4096
-	depends on ZONE_DMA && ZONE_DMA_ALLOW_CUSTOM_SIZE
-	help
-	  Set DMA-able size based on bits shift value. DMA-able size
-	  must be less than total DRAM size. This value may be used
-	  to limit DMA-able address space for ZONE_DMA.
-
+	  If you don't know about TrustZone, say 'N'.
 endmenu
+
 endmenu
 
 menu "Bus support"
@@ -575,6 +621,7 @@ config HMP_VARIABLE_SCALE
 config HMP_FREQUENCY_INVARIANT_SCALE
 	bool "(EXPERIMENTAL) Frequency-Invariant Tracked Load for HMP"
 	depends on HMP_VARIABLE_SCALE && CPU_FREQ
+	default y
 	help
 	  Scales the current load contribution in line with the frequency
 	  of the CPU that the task was executed on.
@@ -672,6 +719,14 @@ config SECCOMP
 	  enabled via prctl(PR_SET_SECCOMP), it cannot be disabled
 	  and the task is only allowed to execute a few safe syscalls
 	  defined by each seccomp mode.
+
+config KEXEC
+	bool "kexec system call"
+	---help---
+	  kexec is a system call that implements the ability to shutdown your
+	  current kernel, and to start another kernel.  It is like a reboot
+	  but it is independent of the system firmware.   And like a reboot
+	  you can start any kernel with it, not just Linux.
 
 config XEN_DOM0
 	def_bool y
@@ -815,6 +870,41 @@ config EFI
 	  allow the kernel to be booted as an EFI application. This
 	  is only useful on systems that have UEFI firmware.
 
+config TIMA
+	bool "Enable TIMA(Trustzone based Integrity Measurement Archtecture feature"
+	default n
+
+config TIMA_LKMAUTH
+	bool "Enable LKM authentication by TIMA"
+	help
+	  TIMA authenticates loaded kernel modules. Disable it if you don't
+	  want TIMA enabled.
+
+config TIMA_RKP
+	bool "Enable RKP (Realtime Kernel Protection) TIMA feature"
+	depends on TIMA
+	default n
+
+config RKP_KDP
+	bool "Protection for cred structure"
+	depends on TIMA_RKP
+	default n
+	help
+		Prevents unauthorized cred modification.
+
+config RKP_DMAP_PROT
+	bool "Page Double Mapping protection"
+	depends on (TIMA_RKP && RKP_KDP)
+	default n
+	help
+		Prevents unauthorized cred modification.
+
+config TIMA_TEST_INFRA
+	tristate "Testing infrastructure for TIMA"
+	default n
+	help
+	  Kernel bits of the TIMA test infrastructure
+
 config BUILD_ARM64_APPENDED_DTB_IMAGE
 	bool "Build a concatenated Image.gz/dtb by default"
 	depends on OF
@@ -855,6 +945,11 @@ config SYSVIPC_COMPAT
 	def_bool y
 	depends on COMPAT && SYSVIPC
 
+config KEYS_COMPAT
+	def_bool y if COMPAT && KEYS
+	help
+	  This option enables support for a 32-bit keyctl syscall callback function under
+	  a 64-bit kernel.
 endmenu
 
 menu "Power management options"

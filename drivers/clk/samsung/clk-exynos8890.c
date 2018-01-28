@@ -50,7 +50,7 @@ enum exynos8890_clks {
 	gate_gpio_nfc, gate_gpio_touch, gate_gpio_fp, gate_gpio_ese, promise_int, promise_disp, ap2cp_mif_pll_out, gate_i2s1, gate_pcm1, gate_spdif,
 
 	/* number for isp0 driver starts from 400 */
-	gate_fimc_isp0 = 400, gate_fimc_tpu, isp0, isp0_tpu, isp0_trex, isp0_ppmu, isp0_bts, pxmxdx_isp0_pxl,
+	gate_fimc_isp0 = 400, gate_fimc_tpu, isp0, isp0_tpu, isp0_trex, isp0_ppmu, isp0_bts,
 
 	/* number for isp1 driver starts from 450 */
 	gate_fimc_isp1 = 450, isp1, isp1_ppmu, isp1_bts,
@@ -108,9 +108,6 @@ enum exynos8890_clks {
 	 * include/dt-bindings/clock/exynos8890.h
 	 */
 	sysmmu_last = 1149,
-
-	/* number of dfs driver starts from 2000 */
-	dfs_mif = 2000, dfs_mif_sw, dfs_int, dfs_cam, dfs_disp,
 
 	nr_clks,
 };
@@ -257,7 +254,6 @@ static struct init_vclk exynos8890_isp0_vclks[] __initdata = {
 	VCLK(CLK_VCLK_SYSMMU_ISP0, gate_isp0_sysmmu, "gate_isp0_sysmmu", 0, 0, NULL),
 	VCLK(isp0_ppmu, gate_isp0_ppmu, "gate_isp0_ppmu", 0, 0, NULL),
 	VCLK(isp0_bts, gate_isp0_bts, "gate_isp0_bts", 0, 0, NULL),
-	VCLK(pxmxdx_isp0_pxl, pxmxdx_isp0_pxl_asbs, "pxmxdx_isp0_pxl_asbs", 0, 0, NULL),
 };
 
 static struct init_vclk exynos8890_isp1_vclks[] __initdata = {
@@ -486,15 +482,6 @@ static struct init_vclk exynos8890_disp1_vclks[] __initdata = {
 	VCLK(disp1_bts, gate_disp1_bts, "gate_disp1_bts", 0, 0, NULL),
 };
 
-static struct init_vclk exynos8890_dfs_vclks[] __initdata = {
-	/* DFS */
-	VCLK(dfs_mif, dvfs_mif, "dvfs_mif", 0, VCLK_DFS, NULL),
-	VCLK(dfs_mif_sw, dvfs_mif, "dvfs_mif_sw", 0, VCLK_DFS_SWITCH, NULL),
-	VCLK(dfs_int, dvfs_int, "dvfs_int", 0, VCLK_DFS, NULL),
-	VCLK(dfs_cam, dvfs_cam, "dvfs_cam", 0, VCLK_DFS, NULL),
-	VCLK(dfs_disp, dvfs_disp, "dvfs_disp", 0, VCLK_DFS, NULL),
-};
-
 void __init exynos8890_clk_init(struct device_node *np)
 {
 	struct samsung_clk_provider *ctx;
@@ -547,11 +534,10 @@ void __init exynos8890_clk_init(struct device_node *np)
 	samsung_register_vclk(ctx, exynos8890_peris_vclks, ARRAY_SIZE(exynos8890_peris_vclks));
 	samsung_register_vclk(ctx, exynos8890_ccore_vclks, ARRAY_SIZE(exynos8890_ccore_vclks));
 	samsung_register_vclk(ctx, exynos8890_clkout_vclks, ARRAY_SIZE(exynos8890_clkout_vclks));
-	samsung_register_vclk(ctx, exynos8890_dfs_vclks, ARRAY_SIZE(exynos8890_dfs_vclks));
 
 	samsung_clk_of_add_provider(np, ctx);
 
-	clk_register_fixed_factor(NULL, "pwm-clock", "gate_peric0_sclk_pwm",CLK_SET_RATE_PARENT, 1, 1);
+	clk_register_fixed_factor(NULL, "pwm-clock", "gate_peric0_pwm",CLK_SET_RATE_PARENT, 1, 1);
 
 	pr_info("EXYNOS8890: Clock setup completed\n");
 }

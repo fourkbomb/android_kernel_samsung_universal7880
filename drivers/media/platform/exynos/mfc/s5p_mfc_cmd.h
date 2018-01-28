@@ -48,6 +48,10 @@ static inline void s5p_mfc_clear_cmds(struct s5p_mfc_dev *dev)
 	}
 }
 
+void s5p_mfc_dbg_enable(struct s5p_mfc_dev *dev);
+void s5p_mfc_dbg_disable(struct s5p_mfc_dev *dev);
+void s5p_mfc_dbg_set_addr(struct s5p_mfc_dev *dev);
+
 #define s5p_mfc_clear_int_flags()				\
 	do {							\
 		MFC_WRITEL(0, S5P_FIMV_RISC2HOST_CMD);	\

@@ -13,7 +13,7 @@
  */
 
 #include "s5p_mfc_buf.h"
-
+#include "s5p_mfc_reg.h"
 #include "s5p_mfc_cmd.h"
 #include "s5p_mfc_mem.h"
 
@@ -93,18 +93,28 @@ int s5p_mfc_alloc_codec_buffers(struct s5p_mfc_ctx *ctx)
 			lcu_height = enc_lcu_height(ctx->img_height);
 			if (ctx->codec_mode != S5P_FIMV_CODEC_HEVC_ENC &&
 				ctx->codec_mode != S5P_FIMV_CODEC_VP9_ENC) {
-				enc->luma_dpb_size =
-					ALIGN((((mb_width * 16) + 63) / 64) * 64
-						* (((mb_height * 16) + 31) / 32)
-						* 32 + 64, 64);
+				if (IS_MFCv10X(dev))
+					enc->luma_dpb_size =
+						ALIGN((((mb_width * 16) + 63) / 64) * 64
+							* (((mb_height * 16) + 31) / 32)
+							* 32 + 64, 64);
+				else
+					enc->luma_dpb_size =
+						ALIGN((((mb_width * 16) + 63) / 64) * 64
+							* (mb_height * 16) + 64, 64);
 				enc->chroma_dpb_size =
 					ALIGN((((mb_width * 16) + 63) / 64)
-						* 64 * (mb_height * 8) + 64, 64);
+							* 64 * (mb_height * 8) + 64, 64);
 			} else {
-				enc->luma_dpb_size =
-					ALIGN((((lcu_width * 32 ) + 63 ) / 64) * 64
-						* (((lcu_height * 32) + 31) / 32)
-						* 32 + 64, 64);
+				if (IS_MFCv10X(dev))
+					enc->luma_dpb_size =
+						ALIGN((((lcu_width * 32 ) + 63 ) / 64) * 64
+							* (((lcu_height * 32) + 31) / 32)
+							* 32 + 64, 64);
+				else
+					enc->luma_dpb_size =
+						ALIGN((((lcu_width * 32) + 63) / 64) * 64
+							* (lcu_height * 32) + 64, 64);
 				enc->chroma_dpb_size =
 					ALIGN((((lcu_width * 32) + 63) / 64)
 						* 64 * (lcu_height * 16) + 64, 64);
@@ -398,7 +408,7 @@ void s5p_mfc_release_codec_buffers(struct s5p_mfc_ctx *ctx)
 
 	dev = ctx->dev;
 	if (!dev) {
-		mfc_err_ctx("no mfc device to run\n");
+		mfc_err("no mfc device to run\n");
 		return;
 	}
 
@@ -417,6 +427,86 @@ void s5p_mfc_release_codec_buffers(struct s5p_mfc_ctx *ctx)
 		ctx->codec_buf_phys = 0;
 		ctx->codec_buf_size = 0;
 	}
+}
+
+void s5p_mfc_dbg_enable(struct s5p_mfc_dev *dev)
+{
+	mfc_debug(2, "MFC debug info enable\n");
+	MFC_WRITEL(0x1, S5P_FIMV_DBG_INFO_ENABLE);
+}
+
+void s5p_mfc_dbg_disable(struct s5p_mfc_dev *dev)
+{
+	mfc_debug(2, "MFC debug info disable\n");
+	MFC_WRITEL(0x0, S5P_FIMV_DBG_INFO_ENABLE);
+}
+
+void s5p_mfc_dbg_set_addr(struct s5p_mfc_dev *dev)
+{
+	struct s5p_mfc_buf_size_v6 *buf_size = dev->variant->buf_size->buf;
+
+	memset((void *)dev->dbg_info_buf.virt, 0, buf_size->dbg_info_buf);
+
+	mfc_debug(2, "MFC debug info set addr(0x%08x), size(0x%08x)\n",
+			(unsigned int)dev->dbg_info_buf.ofs, buf_size->dbg_info_buf);
+	MFC_WRITEL(dev->dbg_info_buf.ofs, S5P_FIMV_DBG_BUFFER_ADDR);
+	MFC_WRITEL(buf_size->dbg_info_buf, S5P_FIMV_DBG_BUFFER_SIZE);
+}
+
+/* Allocation buffer of debug infor memory for FW debugging */
+int s5p_mfc_alloc_dbg_info_buffer(struct s5p_mfc_dev *dev)
+{
+	struct s5p_mfc_buf_size_v6 *buf_size = dev->variant->buf_size->buf;
+	void *alloc_ctx;
+
+	mfc_debug(2, "Allocate a debug-info buffer.\n");
+
+	alloc_ctx = dev->alloc_ctx;
+	dev->dbg_info_buf.alloc = s5p_mfc_mem_alloc_priv(alloc_ctx,
+			buf_size->dbg_info_buf);
+	if (IS_ERR_OR_NULL(dev->dbg_info_buf.alloc)) {
+		mfc_err_dev("failed to allocate debug info memory\n");
+		return -ENOMEM;
+	}
+
+	dev->dbg_info_buf.ofs = s5p_mfc_mem_daddr_priv(dev->dbg_info_buf.alloc);
+	dev->dbg_info_buf.virt = s5p_mfc_mem_vaddr_priv(dev->dbg_info_buf.alloc);
+	if (!dev->dbg_info_buf.virt) {
+		s5p_mfc_mem_free_priv(dev->dbg_info_buf.alloc);
+		dev->dbg_info_buf.ofs = 0;
+		dev->dbg_info_buf.alloc = NULL;
+
+		mfc_err_dev("failed to get virtual address of debug info memory\n");
+		return -ENOMEM;
+	}
+	mfc_debug(2, "dev->dbg_info_buf.ofs = 0x%08lx\n", dev->dbg_info_buf.ofs);
+	mfc_debug(2, "dev->dbg_info_buf.virt = 0x%lx\n", (unsigned long int)dev->dbg_info_buf.virt);
+
+	return 0;
+}
+
+/* Release buffer of debug infor memory for FW debugging */
+int s5p_mfc_release_dbg_info_buffer(struct s5p_mfc_dev *dev)
+{
+	if (!dev) {
+		mfc_err_dev("no mfc device to run\n");
+		return -EINVAL;
+	}
+
+	if (!dev->dbg_info_buf.alloc) {
+		mfc_debug(2, "debug info buffer is already freed\n");
+		return 0;
+	}
+
+	mfc_debug(2, "Release the debug-info buffer.\n");
+
+	s5p_mfc_mem_free_priv(dev->dbg_info_buf.alloc);
+
+	dev->dbg_info_buf.virt = NULL;
+	dev->dbg_info_buf.ofs = 0;
+	dev->dbg_info_buf.alloc = NULL;
+
+	return 0;
 }
 
 /* Allocate memory for instance data buffer */
@@ -529,7 +619,7 @@ void s5p_mfc_release_instance_buffer(struct s5p_mfc_ctx *ctx)
 
 	dev = ctx->dev;
 	if (!dev) {
-		mfc_err_ctx("no mfc device to run\n");
+		mfc_err("no mfc device to run\n");
 		return;
 	}
 
@@ -651,71 +741,6 @@ void s5p_mfc_release_dev_context_buffer(struct s5p_mfc_dev *dev)
 #endif
 }
 
-/* Allocation buffer of ROI macroblock information */
-int mfc_alloc_enc_roi_buffer(struct s5p_mfc_ctx *ctx, struct s5p_mfc_extra_buf *roi_buf)
-{
-	struct s5p_mfc_dev *dev = ctx->dev;
-	struct s5p_mfc_buf_size_v6 *buf_size = dev->variant->buf_size->buf;
-	void *alloc_ctx;
-
-	alloc_ctx = dev->alloc_ctx;
-	roi_buf->alloc = s5p_mfc_mem_alloc_priv(alloc_ctx,
-			buf_size->shared_buf);
-	if (IS_ERR(roi_buf->alloc)) {
-		mfc_err("failed to allocate shared memory\n");
-		return PTR_ERR(roi_buf->alloc);
-	}
-
-	roi_buf->ofs = s5p_mfc_mem_daddr_priv(roi_buf->alloc);
-	roi_buf->virt = s5p_mfc_mem_vaddr_priv(roi_buf->alloc);
-	if (!roi_buf->virt) {
-		s5p_mfc_mem_free_priv(roi_buf->alloc);
-		roi_buf->ofs = 0;
-		roi_buf->alloc = NULL;
-
-		mfc_err("failed to virt addr of shared memory\n");
-		return -ENOMEM;
-	}
-
-	memset((void *)roi_buf->virt, 0, buf_size->shared_buf);
-	s5p_mfc_mem_clean_priv(roi_buf->alloc, roi_buf->virt, 0,
-			buf_size->shared_buf);
-
-	return 0;
-}
-
-/* Wrapper : allocation ROI buffers */
-int s5p_mfc_alloc_enc_roi_buffer(struct s5p_mfc_ctx *ctx)
-{
-	struct s5p_mfc_enc *enc = ctx->enc_priv;
-	int i;
-
-	for (i = 0; i < MFC_MAX_EXTRA_BUF; i++) {
-		if (mfc_alloc_enc_roi_buffer(ctx, &enc->roi_buf[i]) < 0) {
-			mfc_err("Remapping shared mem buffer failed.\n");
-			return -ENOMEM;
-		}
-	}
-
-	return 0;
-}
-
-/* Release buffer of ROI macroblock information */
-void s5p_mfc_release_enc_roi_buffer(struct s5p_mfc_ctx *ctx)
-{
-	struct s5p_mfc_enc *enc = ctx->enc_priv;
-	int i;
-
-	for (i = 0; i < MFC_MAX_EXTRA_BUF; i++) {
-		if (enc->roi_buf[i].alloc) {
-			s5p_mfc_mem_free_priv(enc->roi_buf[i].alloc);
-			enc->roi_buf[i].alloc = NULL;
-			enc->roi_buf[i].ofs = 0;
-			enc->roi_buf[i].virt = NULL;
-		}
-	}
-}
-
 static int calc_plane(int width, int height, int is_tiled)
 {
 	int mbX, mbY;
@@ -744,14 +769,6 @@ void mfc_fill_dynamic_dpb(struct s5p_mfc_ctx *ctx, struct vb2_buffer *vb)
 			if (dpb_vir)
 				memset(dpb_vir, color[i], raw->plane_size[i]);
 			dpb_vir = NV12N_CBCR_BASE(dpb_vir, ctx->img_width,
-						ctx->img_height);
-		}
-	} else if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_NV12N_10B) {
-		dpb_vir = vb2_plane_vaddr(vb, 0);
-		for (i = 0; i < raw->num_planes; i++) {
-			if (dpb_vir)
-				memset(dpb_vir, color[i], raw->plane_size[i]);
-			dpb_vir = NV12N_10B_CBCR_BASE(dpb_vir, ctx->img_width,
 						ctx->img_height);
 		}
 	} else if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420N) {
@@ -796,7 +813,6 @@ static void set_linear_stride_size(struct s5p_mfc_ctx *ctx,
 	case V4L2_PIX_FMT_NV12MT:
 	case V4L2_PIX_FMT_NV12M:
 	case V4L2_PIX_FMT_NV12N:
-	case V4L2_PIX_FMT_NV12N_10B:
 	case V4L2_PIX_FMT_NV21M:
 		raw->stride[0] = ALIGN(ctx->img_width, 16);
 		raw->stride[1] = ALIGN(ctx->img_width, 16);
@@ -874,7 +890,6 @@ void s5p_mfc_dec_calc_dpb_size(struct s5p_mfc_ctx *ctx)
 		raw->plane_size[2] = 0;
 		break;
 	case V4L2_PIX_FMT_NV12N:
-	case V4L2_PIX_FMT_NV12N_10B:
 		raw->plane_size[0] = NV12N_Y_SIZE(ctx->img_width, ctx->img_height);
 		raw->plane_size[1] = NV12N_CBCR_SIZE(ctx->img_width, ctx->img_height);
 		raw->plane_size[2] = 0;
@@ -943,7 +958,15 @@ void s5p_mfc_dec_calc_dpb_size(struct s5p_mfc_ctx *ctx)
 		}
 	}
 
-	if (dec->is_10bit) {
+	for (i = 0; i < raw->num_planes; i++) {
+		if (raw->plane_size[i] < ctx->min_dpb_size[i]) {
+			mfc_info_dev("plane[%d] size is changed %d -> %d\n",
+				i, raw->plane_size[i], ctx->min_dpb_size[i]);
+			raw->plane_size[i] = ctx->min_dpb_size[i];
+		}
+	}
+
+	if (IS_MFCv10X(dev) && dec->profile == S5P_FIMV_D_PROFILE_HEVC_MAIN_10) {
 		switch (ctx->dst_fmt->fourcc) {
 			case V4L2_PIX_FMT_NV12M:
 			case V4L2_PIX_FMT_NV21M:
@@ -956,17 +979,9 @@ void s5p_mfc_dec_calc_dpb_size(struct s5p_mfc_ctx *ctx)
 					ALIGN(ctx->img_width / 4, 16) * (ctx->img_height / 2) + 64;
 				raw->plane_size_2bits[2] = 0;
 				break;
-			case V4L2_PIX_FMT_NV12N_10B:
-				raw->stride_2bits[0] = ALIGN(ctx->img_width / 4, 16);
-				raw->stride_2bits[1] = ALIGN(ctx->img_width / 4, 16);
-				raw->stride_2bits[2] = 0;
-				raw->plane_size_2bits[0] = NV12N_10B_Y_2B_SIZE(ctx->img_width, ctx->img_height);
-				raw->plane_size_2bits[1] = NV12N_10B_CBCR_2B_SIZE(ctx->img_width, ctx->img_height);
-				raw->plane_size_2bits[2] = 0;
-				break;
 			default:
-				mfc_err_ctx("HEVC 10bit: not supported format: %s\n",
-						ctx->dst_fmt->name);
+				mfc_info_ctx("HEVC 10bit support only 2 plane YUV. format : %d\n",
+						ctx->dst_fmt->fourcc);
 				break;
 		}
 	}
@@ -975,14 +990,6 @@ void s5p_mfc_dec_calc_dpb_size(struct s5p_mfc_ctx *ctx)
 		raw->total_plane_size += raw->plane_size[i];
 		mfc_debug(2, "Plane[%d] size = %d, stride = %d\n",
 			i, raw->plane_size[i], raw->stride[i]);
-	}
-	if (dec->is_10bit) {
-		for (i = 0; i < raw->num_planes; i++) {
-			raw->total_plane_size += raw->plane_size_2bits[i];
-			mfc_debug(2, "Plane[%d] 2bit size = %d, stride = %d\n",
-					i, raw->plane_size_2bits[i],
-					raw->stride_2bits[i]);
-		}
 	}
 	mfc_debug(2, "total plane size: %d\n", raw->total_plane_size);
 
@@ -1001,12 +1008,13 @@ void s5p_mfc_dec_calc_dpb_size(struct s5p_mfc_ctx *ctx)
 }
 
 /* Set registers for decoding stream buffer */
-int s5p_mfc_set_dec_stream_buffer(struct s5p_mfc_ctx *ctx, dma_addr_t buf_addr,
+int s5p_mfc_set_dec_stream_buffer(struct s5p_mfc_ctx *ctx, struct s5p_mfc_buf *mfc_buf,
 		  unsigned int start_num_byte, unsigned int strm_size)
 {
 	struct s5p_mfc_dev *dev;
 	struct s5p_mfc_dec *dec;
-	size_t cpb_buf_size;
+	unsigned int cpb_buf_size;
+	dma_addr_t addr;
 
 	mfc_debug_enter();
 	if (!ctx) {
@@ -1024,24 +1032,31 @@ int s5p_mfc_set_dec_stream_buffer(struct s5p_mfc_ctx *ctx, dma_addr_t buf_addr,
 		return -EINVAL;
 	}
 
+	if (mfc_buf)
+		addr = s5p_mfc_mem_plane_addr(ctx, &mfc_buf->vb, 0);
+	else
+		addr = 0;
+
 	cpb_buf_size = ALIGN(dec->src_buf_size, MFC_NV12M_HALIGN);
 
 	if (strm_size >= set_strm_size_max(cpb_buf_size)) {
-		mfc_info_ctx("Decrease strm_size : %u -> %zu, gap : %d\n",
+		mfc_info_ctx("Decrease strm_size : %u -> %u, gap : %d\n",
 				strm_size, set_strm_size_max(cpb_buf_size), CPB_GAP);
 		strm_size = set_strm_size_max(cpb_buf_size);
+		if (mfc_buf)
+			mfc_buf->vb.v4l2_planes[0].bytesused = strm_size;
 	}
 
 	mfc_debug(2, "inst_no: %d, buf_addr: 0x%08llx\n", ctx->inst_no,
-		(unsigned long long)buf_addr);
-	mfc_debug(2, "strm_size: 0x%08x cpb_buf_size: %zu offset: 0x%08x\n",
+		(unsigned long long)addr);
+	mfc_debug(2, "strm_size: 0x%08x cpb_buf_size: %u offset: 0x%08x\n",
 			strm_size, cpb_buf_size, start_num_byte);
 
 	if (strm_size == 0)
 		mfc_info_ctx("stream size is 0\n");
 
 	MFC_WRITEL(strm_size, S5P_FIMV_D_STREAM_DATA_SIZE);
-	MFC_WRITEL(buf_addr, S5P_FIMV_D_CPB_BUFFER_ADDR);
+	MFC_WRITEL(addr, S5P_FIMV_D_CPB_BUFFER_ADDR);
 	MFC_WRITEL(cpb_buf_size, S5P_FIMV_D_CPB_BUFFER_SIZE);
 	MFC_WRITEL(start_num_byte, S5P_FIMV_D_CPB_BUFFER_OFFSET);
 
@@ -1066,10 +1081,14 @@ void s5p_mfc_set_enc_frame_buffer(struct s5p_mfc_ctx *ctx,
 
 /* Set registers for encoding stream buffer */
 int s5p_mfc_set_enc_stream_buffer(struct s5p_mfc_ctx *ctx,
-		dma_addr_t addr, unsigned int size)
+		struct s5p_mfc_buf *mfc_buf)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
+	dma_addr_t addr;
+	unsigned int size;
 
+	addr = s5p_mfc_mem_plane_addr(ctx, &mfc_buf->vb, 0);
+	size = (unsigned int)vb2_plane_size(&mfc_buf->vb, 0);
 	size = ALIGN(size, 512);
 
 	MFC_WRITEL(addr, S5P_FIMV_E_STREAM_BUFFER_ADDR); /* 16B align */
@@ -1357,10 +1376,6 @@ int s5p_mfc_set_dec_frame_buffer(struct s5p_mfc_ctx *ctx)
 		reg |= (0x1 << S5P_FIMV_D_OPT_NOT_CODED_SET_SHIFT);
 		mfc_info_ctx("Notcoded frame copy mode start\n");
 	}
-	/* Enable 10bit Dithering */
-	if (dec->is_10bit)
-		reg |= (0x1 << S5P_FIMV_D_OPT_DITHERING_SET_SHIFT);
-
 	MFC_WRITEL(reg, S5P_FIMV_D_INIT_BUFFER_OPTIONS);
 
 	frame_size_mv = ctx->mv_size;
@@ -1391,7 +1406,7 @@ int s5p_mfc_set_dec_frame_buffer(struct s5p_mfc_ctx *ctx)
 	}
 
 	mfc_set_dec_stride_buffer(ctx, buf_queue);
-	if (dec->is_10bit) {
+	if (IS_MFCv10X(dev) && dec->profile == S5P_FIMV_D_PROFILE_HEVC_MAIN_10) {
 		for (i = 0; i < ctx->raw_buf.num_planes; i++) {
 			MFC_WRITEL(raw->stride_2bits[i], S5P_FIMV_D_FIRST_PLANE_2BIT_DPB_STRIDE_SIZE + (i * 4));
 			MFC_WRITEL(raw->plane_size_2bits[i], S5P_FIMV_D_FIRST_PLANE_2BIT_DPB_SIZE + (i * 4));

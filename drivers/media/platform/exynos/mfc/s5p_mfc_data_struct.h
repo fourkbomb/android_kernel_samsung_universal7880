@@ -38,7 +38,6 @@
 #define MFC_MAX_PLANES		3
 #define MFC_MAX_DPBS		32
 #define MFC_MAX_BUFFERS		32
-#define MFC_MAX_EXTRA_BUF	10
 #define MFC_TIME_INDEX		8
 
 /* Maximum number of temporal layers */
@@ -88,7 +87,6 @@ enum s5p_mfc_inst_state {
 	MFCINST_RUNNING_BUF_FULL,
 	MFCINST_RUNNING,
 	MFCINST_FINISHING,
-	MFCINST_FINISHED,
 	MFCINST_RETURN_INST,
 	MFCINST_ERROR,
 	MFCINST_ABORT,
@@ -98,7 +96,6 @@ enum s5p_mfc_inst_state {
 	MFCINST_RUNNING_NO_OUTPUT,
 	MFCINST_ABORT_INST,
 	MFCINST_DPB_FLUSHING,
-	MFCINST_VPS_PARSED_ONLY,
 	MFCINST_SPECIAL_PARSING,
 	MFCINST_SPECIAL_PARSING_NAL,
 };
@@ -208,7 +205,7 @@ struct s5p_mfc_buf_size_v6 {
 	unsigned int h264_enc_ctx;
 	unsigned int hevc_enc_ctx;
 	unsigned int other_enc_ctx;
-	unsigned int shared_buf;
+	unsigned int dbg_info_buf;
 };
 
 struct s5p_mfc_buf_size {
@@ -257,6 +254,7 @@ struct s5p_mfc_dev {
 #endif
 
 	void __iomem		*regs_base;
+	void __iomem		*isp_status;
 	int			irq;
 	struct resource		*mfc_mem;
 
@@ -344,10 +342,10 @@ struct s5p_mfc_dev {
 	int has_enc_ctx;
 
 	bool has_job;
-	int extra_qos;
-	bool is_only_h264_enc;
 
 	nal_queue_handle *nal_q_handle;
+
+	struct s5p_mfc_extra_buf dbg_info_buf;
 };
 
 /**
@@ -537,7 +535,6 @@ struct s5p_mfc_hevc_enc_params {
 	u8 user_ref;
 	u8 store_ref;
 	u8 prepend_sps_pps_to_idr;
-	u8 roi_enable;
 };
 
 /**
@@ -703,14 +700,6 @@ struct temporal_layer_info {
 	unsigned int temporal_layer_bitrate[VIDEO_MAX_TEMPORAL_LAYERS];
 };
 
-struct mfc_enc_roi_info {
-	char *addr;
-	int size;
-	int upper_qp;
-	int lower_qp;
-	bool enable;
-};
-
 struct mfc_user_shared_handle {
 	int fd;
 	struct ion_handle *ion_handle;
@@ -794,7 +783,7 @@ struct s5p_mfc_dec {
 	int profile;
 	int is_10bit;
 
-	unsigned int err_sync_flag;
+	unsigned int err_reuse_flag;
 };
 
 struct s5p_mfc_enc {
@@ -824,11 +813,7 @@ struct s5p_mfc_enc {
 	unsigned int buf_full;
 
 	int stored_tag;
-	struct mfc_user_shared_handle sh_handle_svc;
-	struct mfc_user_shared_handle sh_handle_roi;
-	int roi_index;
-	struct s5p_mfc_extra_buf roi_buf[MFC_MAX_EXTRA_BUF];
-	struct mfc_enc_roi_info roi_info[MFC_MAX_EXTRA_BUF];
+	struct mfc_user_shared_handle sh_handle;
 };
 
 struct s5p_mfc_fmt {
@@ -884,6 +869,7 @@ struct s5p_mfc_ctx {
 
 	int old_img_width;
 	int old_img_height;
+	int min_dpb_size[3];
 
 	unsigned int enc_drc_flag;
 	int enc_res_change;

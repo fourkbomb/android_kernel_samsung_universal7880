@@ -88,7 +88,7 @@ void decon_to_psr_info(struct decon_device *decon, struct decon_mode_info *psr)
 	psr->psr_mode = decon->pdata->psr_mode;
 	psr->trig_mode = decon->pdata->trig_mode;
 	psr->dsi_mode = decon->pdata->dsi_mode;
-	psr->out_type = decon->pdata->out_type;
+	psr->out_type = decon->out_type;
 }
 
 void decon_to_init_param(struct decon_device *decon, struct decon_param *p)
@@ -106,87 +106,12 @@ void decon_to_init_param(struct decon_device *decon, struct decon_param *p)
 	p->psr.psr_mode = decon->pdata->psr_mode;
 	p->psr.trig_mode = decon->pdata->trig_mode;
 	p->psr.dsi_mode = decon->pdata->dsi_mode;
-	p->psr.out_type = decon->pdata->out_type;
+	p->psr.out_type = decon->out_type;
 	p->nr_windows = decon->pdata->max_win;
 	p->disp_ss_regs = decon->ss_regs;
-	decon_dbg("###psr_mode %d trig_mode %d dsi_mode %d out_type %d nr_windows %d LCD[%d %d]\n",
-		p->psr.psr_mode, p->psr.trig_mode, p->psr.dsi_mode, p->psr.out_type, p->nr_windows,
+	decon_dbg("###psr_mode %d trig_mode %d out_type %d nr_windows %d LCD[%d %d]\n",
+		p->psr.psr_mode, p->psr.trig_mode, p->psr.out_type, p->nr_windows,
 		decon->lcd_info->xres, decon->lcd_info->yres);
-}
-
-u32 decon_get_bpp(enum decon_pixel_format fmt)
-{
-	switch (fmt) {
-	case DECON_PIXEL_FORMAT_ARGB_8888:
-	case DECON_PIXEL_FORMAT_ABGR_8888:
-	case DECON_PIXEL_FORMAT_RGBA_8888:
-	case DECON_PIXEL_FORMAT_BGRA_8888:
-	case DECON_PIXEL_FORMAT_XRGB_8888:
-	case DECON_PIXEL_FORMAT_XBGR_8888:
-	case DECON_PIXEL_FORMAT_RGBX_8888:
-	case DECON_PIXEL_FORMAT_BGRX_8888:
-		return 32;
-
-	case DECON_PIXEL_FORMAT_RGBA_5551:
-	case DECON_PIXEL_FORMAT_RGB_565:
-	case DECON_PIXEL_FORMAT_NV16:
-	case DECON_PIXEL_FORMAT_NV61:
-	case DECON_PIXEL_FORMAT_YVU422_3P:
-		return 16;
-
-	case DECON_PIXEL_FORMAT_NV12:
-	case DECON_PIXEL_FORMAT_NV21:
-	case DECON_PIXEL_FORMAT_NV12M:
-	case DECON_PIXEL_FORMAT_NV21M:
-	case DECON_PIXEL_FORMAT_YUV420:
-	case DECON_PIXEL_FORMAT_YVU420:
-	case DECON_PIXEL_FORMAT_YUV420M:
-	case DECON_PIXEL_FORMAT_YVU420M:
-		return 12;
-
-	default:
-		break;
-	}
-
-	return 0;
-}
-
-int decon_get_plane_cnt(enum decon_pixel_format format)
-{
-	switch (format) {
-	case DECON_PIXEL_FORMAT_ARGB_8888:
-	case DECON_PIXEL_FORMAT_ABGR_8888:
-	case DECON_PIXEL_FORMAT_RGBA_8888:
-	case DECON_PIXEL_FORMAT_BGRA_8888:
-	case DECON_PIXEL_FORMAT_XRGB_8888:
-	case DECON_PIXEL_FORMAT_XBGR_8888:
-	case DECON_PIXEL_FORMAT_RGBX_8888:
-	case DECON_PIXEL_FORMAT_BGRX_8888:
-	case DECON_PIXEL_FORMAT_RGBA_5551:
-	case DECON_PIXEL_FORMAT_RGB_565:
-	case DECON_PIXEL_FORMAT_NV12N:
-	case DECON_PIXEL_FORMAT_NV12N_10B:
-		return 1;
-
-	case DECON_PIXEL_FORMAT_NV16:
-	case DECON_PIXEL_FORMAT_NV61:
-	case DECON_PIXEL_FORMAT_NV12:
-	case DECON_PIXEL_FORMAT_NV21:
-	case DECON_PIXEL_FORMAT_NV12M:
-	case DECON_PIXEL_FORMAT_NV21M:
-		return 2;
-
-	case DECON_PIXEL_FORMAT_YVU422_3P:
-	case DECON_PIXEL_FORMAT_YUV420:
-	case DECON_PIXEL_FORMAT_YVU420:
-	case DECON_PIXEL_FORMAT_YUV420M:
-	case DECON_PIXEL_FORMAT_YVU420M:
-		return 3;
-
-	default:
-		decon_err("invalid format(%d)\n", format);
-		return 1;
-	}
 }
 
 /**
@@ -305,8 +230,6 @@ static inline void disp_ss_event_log_vpp
 		log->data.vpp.id = vpp->id;
 		log->data.vpp.start_cnt = vpp->start_count;
 		log->data.vpp.done_cnt = vpp->done_count;
-		log->data.vpp.width = vpp->config->dst.w;
-		log->data.vpp.height = vpp->config->dst.h;
 		break;
 	default:
 		log->data.vpp.id = vpp->id;
@@ -432,7 +355,7 @@ void DISP_SS_EVENT_LOG_WINCON(struct v4l2_subdev *sd, struct decon_reg_data *reg
 		}
 	}
 
-	if (decon->pdata->out_type == DECON_OUT_WB)
+	if (decon->out_type == DECON_OUT_WB)
 		memcpy(&log->data.reg.win_config[MAX_DECON_WIN], &regs->vpp_config[MAX_DECON_WIN],
 				sizeof(struct decon_win_config));
 

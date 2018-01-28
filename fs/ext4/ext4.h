@@ -125,6 +125,8 @@ typedef unsigned int ext4_group_t;
 #define EXT4_MB_USE_ROOT_BLOCKS		0x1000
 /* Use blocks from reserved pool */
 #define EXT4_MB_USE_RESERVED		0x2000
+/* Use extra reserved root blocks if needed */
+#define EXT4_MB_USE_EXTRA_ROOT_BLOCKS	0x4000
 
 struct ext4_allocation_request {
 	/* target inode for block we're allocating */
@@ -387,10 +389,11 @@ struct flex_groups {
 #define EXT4_EA_INODE_FL	        0x00200000 /* Inode used for large EA */
 #define EXT4_EOFBLOCKS_FL		0x00400000 /* Blocks allocated beyond EOF */
 #define EXT4_INLINE_DATA_FL		0x10000000 /* Inode has inline data. */
+#define EXT4_CORE_FILE_FL		0x40000000 /* allow use of reserved space */
 #define EXT4_RESERVED_FL		0x80000000 /* reserved for ext4 lib */
 
-#define EXT4_FL_USER_VISIBLE		0x004BDFFF /* User visible flags */
-#define EXT4_FL_USER_MODIFIABLE		0x004380FF /* User modifiable flags */
+#define EXT4_FL_USER_VISIBLE		0x404BDFFF /* User visible flags */
+#define EXT4_FL_USER_MODIFIABLE		0x404380FF /* User modifiable flags */
 
 /* Flags that should be inherited by new inodes from their parent. */
 #define EXT4_FL_INHERITED (EXT4_SECRM_FL | EXT4_UNRM_FL | EXT4_COMPR_FL |\
@@ -444,6 +447,7 @@ enum {
 	EXT4_INODE_EA_INODE	= 21,	/* Inode used for large EA */
 	EXT4_INODE_EOFBLOCKS	= 22,	/* Blocks allocated beyond EOF */
 	EXT4_INODE_INLINE_DATA	= 28,	/* Data in inode. */
+	EXT4_INODE_CORE_FILE	= 30,	/* allow use of reserved space */
 	EXT4_INODE_RESERVED	= 31,	/* reserved for ext4 lib */
 };
 
@@ -488,6 +492,7 @@ static inline void ext4_check_flag_values(void)
 	CHECK_FLAG_VALUE(EA_INODE);
 	CHECK_FLAG_VALUE(EOFBLOCKS);
 	CHECK_FLAG_VALUE(INLINE_DATA);
+	CHECK_FLAG_VALUE(CORE_FILE);
 	CHECK_FLAG_VALUE(RESERVED);
 }
 
@@ -1183,7 +1188,9 @@ struct ext4_super_block {
 	__u8	s_encrypt_algos[4];	/* Encryption algorithms in use  */
 	__u8	s_encrypt_pw_salt[16];	/* Salt used for string2key algorithm */
 	__le32	s_lpf_ino;		/* Location of the lost+found inode */
-	__le32	s_reserved[100];	/* Padding to the end of the block */
+	__le32	s_reserved[94];	/* Padding to the end of the block */
+	__le32	s_sec_magic;		/* flag for reserved inodes */
+	__le32	s_reserved2[5];		/* Padding to the end of the block */
 	__le32	s_checksum;		/* crc32c(superblock) */
 };
 
@@ -1234,6 +1241,7 @@ struct ext4_sb_info {
 	unsigned int s_mount_flags;
 	unsigned int s_def_mount_opt;
 	ext4_fsblk_t s_sb_block;
+	atomic64_t s_r_blocks_count;
 	atomic64_t s_resv_clusters;
 	kuid_t s_resuid;
 	kgid_t s_resgid;
@@ -1286,6 +1294,9 @@ struct ext4_sb_info {
 	unsigned long s_ext_blocks;
 	unsigned long s_ext_extents;
 #endif
+
+	/* Reserved inodes count */
+	s64 s_r_inodes_count;
 
 	/* for buddy allocator */
 	struct ext4_group_info ***s_group_info;
@@ -1651,6 +1662,12 @@ static inline int ext4_encrypted_inode(struct inode *inode)
  */
 #define EXT4_DEF_MIN_BATCH_TIME	0
 #define EXT4_DEF_MAX_BATCH_TIME	15000 /* 15ms */
+
+/*
+ * Default reserved inode count
+ */
+#define EXT4_DEF_RESERVE_INODE 4096
+#define EXT4_SEC_DATA_MAGIC 0xBAB0CAFE /* data partition magic */
 
 /*
  * Minimum number of groups in a flexgroup before we separate out
@@ -2353,7 +2370,8 @@ extern int ext4_search_dir(struct buffer_head *bh,
 			   struct ext4_filename *fname,
 			   const struct qstr *d_name,
 			   unsigned int offset,
-			   struct ext4_dir_entry_2 **res_dir);
+			   struct ext4_dir_entry_2 **res_dir,
+			   char *ci_name_buf);
 extern int ext4_generic_delete_entry(handle_t *handle,
 				     struct inode *dir,
 				     struct ext4_dir_entry_2 *de_del,
@@ -2513,6 +2531,14 @@ extern void ext4_group_desc_csum_set(struct super_block *sb, __u32 group,
 				     struct ext4_group_desc *gdp);
 extern int ext4_register_li_request(struct super_block *sb,
 				    ext4_group_t first_not_zeroed);
+/* for debugging, sangwoo2.lee */
+extern void print_iloc_info(struct super_block *sb,
+				struct ext4_iloc iloc);
+extern void print_bh(struct super_block *sb,
+                  struct buffer_head *bh, int start, int len);
+extern void print_block_data(struct super_block *sb, sector_t blocknr,
+                  unsigned char *data_to_dump, int start, int len);
+/* for debugging */
 
 static inline int ext4_has_group_desc_csum(struct super_block *sb)
 {

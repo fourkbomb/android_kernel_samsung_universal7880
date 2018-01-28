@@ -313,6 +313,7 @@ int mmc_of_parse(struct mmc_host *host)
 	int len, ret;
 	bool cd_cap_invert, cd_gpio_invert = false;
 	bool ro_cap_invert, ro_gpio_invert = false;
+	u32 device_strength;
 
 	if (!host->parent || !host->parent->of_node)
 		return 0;
@@ -461,6 +462,10 @@ int mmc_of_parse(struct mmc_host *host)
 		host->dsr_req = 0;
 	}
 
+	if (!of_property_read_u32(np, "device_drv", &device_strength))
+		host->device_drv = device_strength << 4;
+	else
+		host->device_drv = MMC_DRIVER_TYPE_0;
 	return 0;
 
 out:
@@ -512,6 +517,10 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 
 	spin_lock_init(&host->lock);
 	init_waitqueue_head(&host->wq);
+	host->wlock_name = kasprintf(GFP_KERNEL,
+			"%s_detect", mmc_hostname(host));
+	wake_lock_init(&host->detect_wake_lock, WAKE_LOCK_SUSPEND,
+			host->wlock_name);
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
 #ifdef CONFIG_PM
 	host->pm_notify.notifier_call = mmc_pm_notify;
@@ -611,6 +620,7 @@ void mmc_free_host(struct mmc_host *host)
 	spin_lock(&mmc_host_lock);
 	idr_remove(&mmc_host_idr, host->index);
 	spin_unlock(&mmc_host_lock);
+	wake_lock_destroy(&host->detect_wake_lock);
 
 	put_device(&host->class_dev);
 }

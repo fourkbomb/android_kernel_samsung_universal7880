@@ -84,6 +84,7 @@
 /* additional information */
 #define s5p_mfc_get_consumed_stream()	MFC_READL(S5P_FIMV_D_DECODED_NAL_SIZE)
 #define s5p_mfc_get_dpb_count()		MFC_READL(S5P_FIMV_D_MIN_NUM_DPB)
+#define s5p_mfc_get_min_dpb_size(x)	MFC_READL(S5P_FIMV_D_MIN_FIRST_PLANE_DPB_SIZE + (x * 4))
 #define s5p_mfc_get_scratch_size()	MFC_READL(S5P_FIMV_D_MIN_SCRATCH_BUFFER_SIZE)
 #define s5p_mfc_get_dis_count()		0
 #define s5p_mfc_get_mv_count()		MFC_READL(S5P_FIMV_D_MIN_NUM_MV)

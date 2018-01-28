@@ -24,14 +24,14 @@
 void mfc_fill_dynamic_dpb(struct s5p_mfc_ctx *ctx, struct vb2_buffer *vb);
 int s5p_mfc_set_dec_frame_buffer(struct s5p_mfc_ctx *ctx);
 int s5p_mfc_set_dec_stream_buffer(struct s5p_mfc_ctx *ctx,
-		dma_addr_t buf_addr,
+		struct s5p_mfc_buf *mfc_buf,
 		unsigned int start_num_byte,
 		unsigned int buf_size);
 
 void s5p_mfc_set_enc_frame_buffer(struct s5p_mfc_ctx *ctx,
 		dma_addr_t addr[], int num_planes);
 int s5p_mfc_set_enc_stream_buffer(struct s5p_mfc_ctx *ctx,
-		dma_addr_t addr, unsigned int size);
+		struct s5p_mfc_buf *mfc_buf);
 void s5p_mfc_get_enc_frame_buffer(struct s5p_mfc_ctx *ctx,
 		dma_addr_t addr[], int num_planes);
 int s5p_mfc_set_enc_ref_buffer(struct s5p_mfc_ctx *mfc_ctx);
@@ -44,10 +44,12 @@ int s5p_mfc_alloc_instance_buffer(struct s5p_mfc_ctx *ctx);
 void s5p_mfc_release_instance_buffer(struct s5p_mfc_ctx *ctx);
 int s5p_mfc_alloc_dev_context_buffer(struct s5p_mfc_dev *dev);
 void s5p_mfc_release_dev_context_buffer(struct s5p_mfc_dev *dev);
-int s5p_mfc_alloc_enc_roi_buffer(struct s5p_mfc_ctx *ctx);
-void s5p_mfc_release_enc_roi_buffer(struct s5p_mfc_ctx *ctx);
 
 void s5p_mfc_dec_calc_dpb_size(struct s5p_mfc_ctx *ctx);
 void s5p_mfc_enc_calc_src_size(struct s5p_mfc_ctx *ctx);
+
+void s5p_mfc_dbg_enable(struct s5p_mfc_dev *dev);
+void s5p_mfc_dbg_disable(struct s5p_mfc_dev *dev);
+void s5p_mfc_dbg_set_addr(struct s5p_mfc_dev *dev);
 
 #endif /* __S5P_MFC_BUF_H */

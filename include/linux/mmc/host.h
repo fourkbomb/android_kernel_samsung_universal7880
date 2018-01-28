@@ -15,10 +15,18 @@
 #include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/fault-inject.h>
+#include <linux/wakelock.h>
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/pm.h>
+
+#define MMC_DRIVER_TYPE_0	0	/* Default, x1 */
+#define MMC_DRIVER_TYPE_1	1	/* x1.5 */
+#define MMC_DRIVER_TYPE_2	2	/* x0.75 */
+#define MMC_DRIVER_TYPE_3	3	/* x0.5 */
+#define MMC_DRIVER_TYPE_4	4	/* x1.2 */
+#define MMC_DRIVER_TYPE_5	5	/* x2 */
 
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
@@ -148,6 +156,7 @@ struct mmc_host_ops {
 	 */
 	int	(*multi_io_quirk)(struct mmc_card *card,
 				  unsigned int direction, int blk_size);
+	void	(*shutdown)(struct mmc_host *host);
 };
 
 struct mmc_card;
@@ -212,6 +221,7 @@ struct mmc_host {
 	unsigned int		f_min;
 	unsigned int		f_max;
 	unsigned int		f_init;
+	u32 			device_drv; /* device strength */
 	u32			ocr_avail;
 	u32			ocr_avail_sdio;	/* SDIO-specific OCR */
 	u32			ocr_avail_sd;	/* SD-specific OCR */
@@ -293,6 +303,9 @@ struct mmc_host {
 #define MMC_CAP2_SDIO_IRQ_NOTHREAD	(1 << 17)
 #define MMC_CAP2_STROBE_ENHANCED	(1 << 18) /* enhanced strobe */
 #define MMC_CAP2_SKIP_INIT_SCAN		(1 << 19) /* skip init mmc scan */
+#define MMC_CAP2_DETECT_ON_ERR	(1 << 22)	/* On I/O err check card removal */
+#define MMC_CAP2_PWR_SHUT_DOWN		(1 << 23) /* emmc cntrl pwr in shutdown */
+
 	mmc_pm_flag_t		pm_caps;	/* supported pm features */
 
 #ifdef CONFIG_MMC_CLKGATE
@@ -341,11 +354,17 @@ struct mmc_host {
 	int			claim_cnt;	/* "claim" nesting count */
 
 	struct delayed_work	detect;
+	struct wake_lock        detect_wake_lock;
+	const char              *wlock_name;
 	int			detect_change;	/* card detect flag */
 	struct mmc_slot		slot;
 
 	const struct mmc_bus_ops *bus_ops;	/* current bus driver */
 	unsigned int		bus_refs;	/* reference counter */
+
+	unsigned int		bus_resume_flags;
+#define MMC_BUSRESUME_MANUAL_RESUME	(1 << 0)
+#define MMC_BUSRESUME_NEEDS_RESUME	(1 << 1)
 
 	unsigned int		sdio_irqs;
 	struct task_struct	*sdio_irq_thread;
@@ -413,6 +432,19 @@ static inline void *mmc_priv(struct mmc_host *host)
 #define mmc_dev(x)	((x)->parent)
 #define mmc_classdev(x)	(&(x)->class_dev)
 #define mmc_hostname(x)	(dev_name(&(x)->class_dev))
+#define mmc_bus_needs_resume(host) ((host)->bus_resume_flags & MMC_BUSRESUME_NEEDS_RESUME)
+#define mmc_bus_manual_resume(host) ((host)->bus_resume_flags & MMC_BUSRESUME_MANUAL_RESUME)
+
+static inline void mmc_set_bus_resume_policy(struct mmc_host *host, int manual)
+{
+	if (manual) {
+		host->bus_resume_flags |= MMC_BUSRESUME_MANUAL_RESUME;
+		host->bus_resume_flags &= ~MMC_BUSRESUME_NEEDS_RESUME;
+	} else
+		host->bus_resume_flags &= ~MMC_BUSRESUME_MANUAL_RESUME;
+}
+
+extern int mmc_resume_bus(struct mmc_host *host);
 
 int mmc_power_save_host(struct mmc_host *host);
 int mmc_power_restore_host(struct mmc_host *host);

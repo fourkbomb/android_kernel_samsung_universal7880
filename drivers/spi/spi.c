@@ -948,14 +948,10 @@ static void spi_pump_messages(struct kthread_work *work)
 		ret = master->prepare_transfer_hardware(master);
 		if (ret) {
 			dev_err(&master->dev,
-				"failed to prepare transfer hardware: %d\n",
-				ret);
+				"failed to prepare transfer hardware\n");
 
 			if (master->auto_runtime_pm)
 				pm_runtime_put(master->dev.parent);
-
-			master->cur_msg->status = ret;
-			spi_finalize_current_message(master);
 			return;
 		}
 	}

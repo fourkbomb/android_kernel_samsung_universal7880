@@ -15,27 +15,47 @@
 /**
  * System power down mode
  */
+#ifdef CONFIG_SOC_EXYNOS7880
+enum sys_powerdown {
+	SYS_SICD,
+	SYS_STOP,
+	SYS_LPD,
+	SYS_DSTOP,
+	NUM_SYS_POWERDOWN,
+	/* Below are all invalid modes for Exynos7880,
+	 * Kept just to avoid compilation errors */
+	SYS_SICD_CPD,
+	SYS_AFTR,
+	SYS_ALPA,
+	SYS_SLEEP,
+};
+
+#else
+
 enum sys_powerdown {
         SYS_SICD,
+#if !defined(CONFIG_SOC_EXYNOS7870)
         SYS_SICD_CPD,
-        SYS_SICD_AUD,
+#endif
         SYS_AFTR,
         SYS_STOP,
+#if !defined(CONFIG_SOC_EXYNOS7870)
         SYS_DSTOP,
+#endif
         SYS_LPD,
+#if !defined(CONFIG_SOC_EXYNOS7870)
         SYS_ALPA,
+#endif
         SYS_SLEEP,
         NUM_SYS_POWERDOWN,
 };
+#endif
 
-extern void exynos_prepare_sys_powerdown(enum sys_powerdown mode);
+extern int exynos_prepare_sys_powerdown(enum sys_powerdown mode);
 extern void exynos_wakeup_sys_powerdown(enum sys_powerdown mode, bool early_wakeup);
 extern int determine_lpm(void);
 extern void exynos_prepare_cp_call(void);
 extern void exynos_wakeup_cp_call(bool early_wakeup);
-extern char *sys_powerdown_str[NUM_SYS_POWERDOWN];
-
-#define get_sys_powerdown_str(mode)	sys_powerdown_str[mode]
 
 /**
  * Functions for cpuidle driver
@@ -120,4 +140,7 @@ extern u64 exynos_get_eint_wake_mask(void);
 #else
 static inline u64 exynos_get_eint_wake_mask(void) { return 0xffffffffL; }
 #endif
+
+#define EXYNOS_SS_CPD_INDEX		('C' + 'P' + 'D')		/* 215 */
+#define EXYNOS_SS_SICD_INDEX		('S' + 'I' + 'C' + 'D')		/* 291 */
 #endif /* __EXYNOS_POWERMODE_H */

@@ -7,6 +7,7 @@
 #include "pwrcal-rae.h"
 #include "pwrcal-asv.h"
 #include <linux/exynos-ss.h>
+#include <trace/events/exynos.h>
 
 #define MARGIN_UNIT 6250
 
@@ -227,7 +228,7 @@ int cal_pd_status(unsigned int id)
 int cal_pm_enter(int mode)
 {
 	if (cal_pm_ops.pm_enter)
-		cal_pm_ops.pm_enter(mode);
+		return cal_pm_ops.pm_enter(mode);
 
 	return 0;
 }
@@ -288,9 +289,10 @@ int cal_dfs_set_rate(unsigned int id, unsigned long rate)
 	struct vclk *vclk;
 	unsigned long flag;
 	int ret = 0;
-#ifdef CONFIG_EXYNOS_SNAPSHOT_CLK
+#if defined(CONFIG_EXYNOS_SNAPSHOT_CLK)
 	const char *name = "cal_dfs_set_rate";
 #endif
+
 	vclk = cal_get_vclk(id);
 	if (!vclk)
 		return -1;
@@ -305,6 +307,7 @@ int cal_dfs_set_rate(unsigned int id, unsigned long rate)
 	}
 
 	exynos_ss_clk(vclk, name, ESS_FLAG_IN);
+	trace_exynos_clk_in(vclk, __func__);
 
 	if (dfs->table->private_trans)
 		ret = dfs->table->private_trans(vclk->vfreq, rate, dfs->table);
@@ -316,8 +319,11 @@ int cal_dfs_set_rate(unsigned int id, unsigned long rate)
 	if (!ret) {
 		vclk->vfreq = rate;
 		exynos_ss_clk(vclk, name, ESS_FLAG_OUT);
-	} else
+		trace_exynos_clk_out(vclk, __func__);
+	} else {
 		exynos_ss_clk(vclk, name, ESS_FLAG_ON);
+		trace_exynos_clk_on(vclk, __func__);
+	}
 out:
 	spin_unlock_irqrestore(dfs->lock, flag);
 	return ret;
@@ -363,9 +369,10 @@ unsigned long cal_dfs_cached_get_rate(unsigned int id)
 	struct vclk *vclk;
 	unsigned long flag;
 	unsigned long ret = 0;
-#ifdef CONFIG_EXYNOS_SNAPSHOT_CLK
+#if defined(CONFIG_EXYNOS_SNAPSHOT_CLK)
 	const char *name = "cal_dfs_get_rate";
 #endif
+
 	vclk = cal_get_vclk(id);
 	if (!vclk)
 		return 0;
@@ -375,16 +382,19 @@ unsigned long cal_dfs_cached_get_rate(unsigned int id)
 	spin_lock_irqsave(dfs->lock, flag);
 
 	exynos_ss_clk(vclk, name, ESS_FLAG_IN);
+	trace_exynos_clk_in(vclk, __func__);
 
 	if (!vclk->ref_count) {
 		pr_err("%s : %s reference count is zero \n", __func__, vclk->name);
 		exynos_ss_clk(vclk, name, ESS_FLAG_ON);
+		trace_exynos_clk_on(vclk, __func__);
 		goto out;
 	}
 
 	ret = vclk->vfreq;
 
 	exynos_ss_clk(vclk, name, ESS_FLAG_OUT);
+	trace_exynos_clk_out(vclk, __func__);
 out:
 	spin_unlock_irqrestore(dfs->lock, flag);
 	return ret;
@@ -396,9 +406,10 @@ unsigned long cal_dfs_get_rate(unsigned int id)
 	struct vclk *vclk;
 	unsigned long flag;
 	unsigned long ret = 0;
-#ifdef CONFIG_EXYNOS_SNAPSHOT_CLK
+#if defined(CONFIG_EXYNOS_SNAPSHOT_CLK)
 	const char *name = "cal_dfs_get_rate";
 #endif
+
 	vclk = cal_get_vclk(id);
 	if (!vclk)
 		return 0;
@@ -408,10 +419,12 @@ unsigned long cal_dfs_get_rate(unsigned int id)
 	spin_lock_irqsave(dfs->lock, flag);
 
 	exynos_ss_clk(vclk, name, ESS_FLAG_IN);
+	trace_exynos_clk_in(vclk, __func__);
 
 	if (!vclk->ref_count) {
 		pr_err("%s : %s reference count is zero \n", __func__, vclk->name);
 		exynos_ss_clk(vclk, name, ESS_FLAG_ON);
+		trace_exynos_clk_on(vclk, __func__);
 		goto out;
 	}
 
@@ -423,8 +436,11 @@ unsigned long cal_dfs_get_rate(unsigned int id)
 	if (ret > 0) {
 		vclk->vfreq = (unsigned long)ret;
 		exynos_ss_clk(vclk, name, ESS_FLAG_OUT);
-	} else
+		trace_exynos_clk_out(vclk, __func__);
+	} else {
 		exynos_ss_clk(vclk, name, ESS_FLAG_ON);
+		trace_exynos_clk_on(vclk, __func__);
+	}
 out:
 	spin_unlock_irqrestore(dfs->lock, flag);
 	return ret;
@@ -460,21 +476,23 @@ int cal_dfs_get_asv_table(unsigned int id, unsigned int *table)
 	int volt_offset = 0;
 	int org_volt, percent_volt;
 
-	if (dfsops->get_margin_param)
-		volt_offset = dfsops->get_margin_param(id);
+	if (dfsops) {
+		if (dfsops->get_margin_param)
+			volt_offset = dfsops->get_margin_param(id);
 
-	if (dfsops->get_asv_table) {
-		num_of_entry = dfsops->get_asv_table(table);
+		if (dfsops->get_asv_table) {
+			num_of_entry = dfsops->get_asv_table(table);
 
-		for (i = 0; i < num_of_entry; i++) {
-			org_volt = (int)table[i];
-			percent_volt = set_percent_offset(org_volt);
-			table[i] = (unsigned int)(percent_volt + volt_offset);
-			pr_info("L%2d: %7d uV, percent_offset(%d)-> %7d uV, volt_offset(%d uV)-> %7duV\n",
-						i, org_volt, offset_percent,
-						percent_volt, volt_offset, table[i]);
+			for (i = 0; i < num_of_entry; i++) {
+				org_volt = (int)table[i];
+				percent_volt = set_percent_offset(org_volt);
+				table[i] = (unsigned int)(percent_volt + volt_offset);
+				pr_info("L%2d: %7d uV, percent_offset(%d)-> %7d uV, volt_offset(%d uV)-> %7duV\n",
+							i, org_volt, offset_percent,
+							percent_volt, volt_offset, table[i]);
+			}
+			return num_of_entry;
 		}
-		return num_of_entry;
 	}
 
 	return 0;
@@ -555,9 +573,6 @@ int cal_dfs_ext_ctrl(unsigned int id,
 			if (dfsops->ctrl_clk_gate)
 				return dfsops->ctrl_clk_gate(para);
 			break;
-		case cal_dfs_rate_lock:
-			if (dfsops->rate_lock)
-				return dfsops->rate_lock(para);
 		default:
 			return -1;
 		}
@@ -597,14 +612,6 @@ int cal_dfs_get_rate_asv_table(unsigned int id,
 	}
 
 	return num_of_entry;
-}
-
-unsigned int cal_asv_pmic_info(void)
-{
-	if (cal_asv_ops.asv_pmic_info)
-		return cal_asv_ops.asv_pmic_info();
-
-	return -1;
 }
 
 void cal_asv_print_info(void)
@@ -654,18 +661,17 @@ int cal_asv_get_tablever(void)
 	return -1;
 }
 
+void cal_asv_set_ssa1(unsigned int id, unsigned int gnum, unsigned int ssa1)
+{
+	if (cal_asv_ops.set_ssa1)
+		cal_asv_ops.set_ssa1(id, gnum, ssa1);
+
+}
+
 void cal_asv_set_ssa0(unsigned int id, unsigned int ssa0)
 {
 	if (cal_asv_ops.set_ssa0)
 		cal_asv_ops.set_ssa0(id, ssa0);
-}
-
-int cal_asv_get_ids_info(unsigned int domain)
-{
-	if (cal_asv_ops.get_ids_info)
-		return cal_asv_ops.get_ids_info(domain);
-
-	return -1;
 }
 
 int cal_init(void)

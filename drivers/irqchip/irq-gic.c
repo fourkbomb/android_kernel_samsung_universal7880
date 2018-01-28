@@ -236,7 +236,8 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 		for_each_cpu_mask(cpu, temp_mask) {
 			if (cpu >= NR_GIC_CPU_IF || cpu >= nr_cpu_ids)
 				goto err_out;
-			bit |= gic_cpu_map[cpu];
+			if (cpu < 4)
+				bit |= gic_cpu_map[cpu];
 		}
 		bit <<= shift;
 	} else {

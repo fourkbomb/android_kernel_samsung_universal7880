@@ -31,6 +31,7 @@
 #include <soc/samsung/tmu.h>
 
 #include "exynos_tmu_data.h"
+#include <trace/events/exynos.h>
 
 static DEFINE_IDR(cpufreq_idr);
 static DEFINE_MUTEX(cooling_cpufreq_lock);
@@ -314,11 +315,13 @@ static int cpufreq_thermal_notifier(struct notifier_block *nb,
 
 		if (policy->max != max_freq) {
 			if (policy->cpu)
-				cooling_device_name = "cluster1";
+			        cooling_device_name = "cluster1";
 			else
-				cooling_device_name = "cluster0";
+			        cooling_device_name = "cluster0";
+
 			cpufreq_verify_within_limits(policy, 0, max_freq);
 			exynos_ss_thermal(NULL, 0, cooling_device_name, max_freq);
+			trace_exynos_thermal(NULL, 0, cooling_device_name, max_freq);
 		}
 	}
 	mutex_unlock(&cooling_cpufreq_lock);

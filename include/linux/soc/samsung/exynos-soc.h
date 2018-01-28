@@ -23,9 +23,12 @@
 #define EXYNOS5420_SOC_ID	0xE5420000
 #define EXYNOS5440_SOC_ID	0xE5440000
 #define EXYNOS5800_SOC_ID	0xE5422000
+#define EXYNOS7870_SOC_ID	0xE7870000
+#define EXYNOS7880_SOC_ID	0xE7880000
 #define EXYNOS8890_SOC_ID	0xE8890000
 
 #define EXYNOS_SOC_MASK		0xFFFFF000
+#define EXYNOS_LOTID_MASK	0x001FFFFF
 
 #define EXYNOS4210_REV_0	0x0
 #define EXYNOS4210_REV_1_0	0x10
@@ -43,6 +46,7 @@
 struct exynos_chipid_info {
 	u32 product_id;
 	u32 revision;
+	u32 lot_id;
 	u64 unique_id;
 };
 

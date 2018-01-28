@@ -93,7 +93,7 @@ struct fts_i2c_platform_data {
 	unsigned gpio_sda;
 };
 
-#undef SEC_TSP_FACTORY_TEST
+#define SEC_TSP_FACTORY_TEST
 
 // #define FTS_SUPPORT_TA_MODE // DE version don't need.
 

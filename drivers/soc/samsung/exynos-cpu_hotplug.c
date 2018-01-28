@@ -11,14 +11,31 @@
  */
 
 #include <linux/cpu.h>
-#include <linux/fb.h>
 #include <linux/kthread.h>
+#include <linux/of.h>
 #include <linux/pm_qos.h>
 #include <linux/suspend.h>
+
+static volatile bool hp_in_progress = false;
+
+static void update_in_progress_flag(bool flag)
+{
+	hp_in_progress = flag;
+}
+
+bool exynos_hotplug_in_progress(void)
+{
+	bool hp_in;
+
+	hp_in = hp_in_progress;
+	return hp_in;
+}
 
 static int cpu_hotplug_in(const struct cpumask *mask)
 {
 	int cpu, ret = 0;
+
+	update_in_progress_flag(true);
 
 	for_each_cpu(cpu, mask) {
 		ret = cpu_up(cpu);
@@ -40,6 +57,7 @@ static int cpu_hotplug_in(const struct cpumask *mask)
 		}
 	}
 
+	update_in_progress_flag(false);
 	return ret;
 }
 
@@ -67,7 +85,7 @@ static int cpu_hotplug_out(const struct cpumask *mask)
 }
 
 static struct {
-	/* Control cpu hotplug operation */
+	/* Disable cpu hotplug operation */
 	bool			enabled;
 
 	/* flag for suspend */
@@ -102,9 +120,7 @@ static struct {
 	.lock = __MUTEX_INITIALIZER(cpu_hotplug.lock),
 };
 
-static inline void cpu_hotplug_suspend(bool enable)
-{
-	/* This lock guarantees completion of do_cpu_hotplug() */
+static inline void update_suspend_flag(bool enable) {
 	mutex_lock(&cpu_hotplug.lock);
 	cpu_hotplug.suspended = enable;
 	mutex_unlock(&cpu_hotplug.lock);
@@ -140,8 +156,8 @@ static struct cpumask create_cpumask(void)
 	int cpu;
 	struct cpumask mask;
 
-	online_cpu_min = min(pm_qos_request(PM_QOS_CPU_ONLINE_MIN), nr_cpu_ids);
-	online_cpu_max = min(pm_qos_request(PM_QOS_CPU_ONLINE_MAX), nr_cpu_ids);
+	online_cpu_min = pm_qos_request(PM_QOS_CPU_ONLINE_MIN),
+	online_cpu_max = pm_qos_request(PM_QOS_CPU_ONLINE_MAX);
 
 	cpumask_clear(&mask);
 
@@ -159,7 +175,7 @@ static struct cpumask create_cpumask(void)
  * enables or disables cpus, so all APIs in this driver call do_cpu_hotplug()
  * eventually.
  */
-static int do_cpu_hotplug(void *param)
+static int do_cpu_hotplug(void)
 {
 	int ret = 0;
 	struct cpumask disable_cpus, enable_cpus;
@@ -167,10 +183,7 @@ static int do_cpu_hotplug(void *param)
 
 	mutex_lock(&cpu_hotplug.lock);
 
-	/*
-	 * If cpu hotplug is disabled or suspended,
-	 * do_cpu_hotplug() do nothing.
-	 */
+	/* If cpu hotplug is disabled, do_cpu_hotplug() do nothing. */
 	if (!cpu_hotplug.enabled || cpu_hotplug.suspended) {
 		mutex_unlock(&cpu_hotplug.lock);
 		return 0;
@@ -200,21 +213,14 @@ static int do_cpu_hotplug(void *param)
 
 	/* If request has the callback, call cpus_up() and cpus_down() */
 	if (!cpumask_empty(&enable_cpus)) {
-		if (param)
-			ret = cpus_up(&enable_cpus);
-		else
-			ret = cpu_hotplug_in(&enable_cpus);
-
+		ret = cpu_hotplug_in(&enable_cpus);
 		if (ret)
 			goto out;
 	}
 
-	if (!cpumask_empty(&disable_cpus)) {
-		if (param)
-			ret = cpus_down(&disable_cpus);
-		else
-			ret = cpu_hotplug_out(&disable_cpus);
-	}
+	if (!cpumask_empty(&disable_cpus))
+		ret = cpu_hotplug_out(&disable_cpus);
+
 out:
 	/* If it fails to complete cpu hotplug request, retries after 100ms */
 	if (ret)
@@ -228,7 +234,7 @@ out:
 
 static void cpu_hotplug_work(struct work_struct *work)
 {
-	do_cpu_hotplug(NULL);
+	do_cpu_hotplug();
 }
 
 static int control_cpu_hotplug(bool enable)
@@ -238,7 +244,7 @@ static int control_cpu_hotplug(bool enable)
 
 	if (enable) {
 		update_enable_flag(true);
-		do_cpu_hotplug(NULL);
+		do_cpu_hotplug();
 	} else {
 		mutex_lock(&cpu_hotplug.lock);
 
@@ -273,7 +279,7 @@ static int control_cpu_hotplug(bool enable)
 static int cpu_hotplug_qos_handler(struct notifier_block *b,
 					 unsigned long val, void *v)
 {
-	return do_cpu_hotplug(v);
+	return do_cpu_hotplug();
 }
 
 static struct notifier_block cpu_hotplug_qos_notifier = {
@@ -289,6 +295,7 @@ static struct notifier_block cpu_hotplug_qos_notifier = {
  */
 struct pm_qos_request user_min_cpu_hotplug_request;
 struct pm_qos_request user_max_cpu_hotplug_request;
+struct pm_qos_request str_max_cpu_hotplug_request;
 
 static ssize_t show_control_online_cpus(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
@@ -372,10 +379,10 @@ attr_online_cpu(max);
 /*
  * User can control the cpu hotplug operation as below:
  *
- * #echo 1 > /sys/power/cpuhotplug/enabled => enable
- * #echo 0 > /sys/power/cpuhotplug/enabled => disable
+ * #echo 1 > /sys/power/cpuhotplug/enable => enable
+ * #echo 0 > /sys/power/cpuhotplug/enable => disable
  *
- * If enabled become 0, hotplug driver enable the all cpus and no hotplug
+ * If disable become 0, hotplug driver enable the all cpus and no hotplug
  * operation happen from hotplug driver.
  */
 static ssize_t show_cpu_hotplug_enable(struct kobject *kobj,
@@ -417,33 +424,57 @@ static void __init cpu_hotplug_dt_init(void)
 {
 	struct device_node *np = of_find_node_by_name(NULL, "cpu_hotplug");
 
-	if (of_property_read_u32(np, "boot_lock_time", &cpu_hotplug.boot_lock_time)) {
+	if (of_property_read_u32(np, "boot_lock_time", &cpu_hotplug.boot_lock_time))
 		pr_warn("boot_lock_time property is omitted!\n");
-		return;
-	}
 }
 
-static int exynos_cpu_hotplug_pm_notifier(struct notifier_block *notifier,
+#define CLUSTER0_NR_CPUS	4
+static int exynos_cpu_hotplug_pm_notifier_down(struct notifier_block *notifier,
 				       unsigned long pm_event, void *v)
 {
 	switch (pm_event) {
 	case PM_SUSPEND_PREPARE:
-		cpu_hotplug_suspend(true);
-		break;
+		pm_qos_update_request(&str_max_cpu_hotplug_request, CLUSTER0_NR_CPUS);
 
-	case PM_POST_SUSPEND:
-		cpu_hotplug_suspend(false);
-		do_cpu_hotplug(NULL);
+		update_suspend_flag(true);
 		break;
 	}
 
 	return NOTIFY_OK;
 }
 
-static struct notifier_block exynos_cpu_hotplug_nb = {
-	.notifier_call = exynos_cpu_hotplug_pm_notifier,
+static int exynos_cpu_hotplug_pm_notifier_up(struct notifier_block *notifier,
+		unsigned long pm_event, void *v)
+{
+	switch (pm_event) {
+	case PM_POST_SUSPEND:
+		update_suspend_flag(false);
+		pm_qos_update_request(&str_max_cpu_hotplug_request, NR_CPUS);
+
+		do_cpu_hotplug();
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block exynos_cpu_hotplug_down_nb = {
+	.notifier_call = exynos_cpu_hotplug_pm_notifier_down,
+	/*
+	 * Adjust the priority for PM_SUSPEND_PREPARE, this pm notifier should be called
+	 * before calling pm notifier in exynos-hotplug_governor.c
+	 */
+	.priority       = INT_MAX,
 };
 
+static struct notifier_block exynos_cpu_hotplug_up_nb = {
+	.notifier_call = exynos_cpu_hotplug_pm_notifier_up,
+	/*
+	 * Adjust the priority for PM_POST_SUSPEND, this pm notifier should be called
+	 * before calling pm notifier in exynos-hotplug_governor.c
+	 */
+	.priority       = INT_MIN + 1,
+};
 
 static struct pm_qos_request boot_min_cpu_hotplug_request;
 static void __init cpu_hotplug_pm_qos_init(void)
@@ -459,10 +490,21 @@ static void __init cpu_hotplug_pm_qos_init(void)
 		NR_CPUS, cpu_hotplug.boot_lock_time * USEC_PER_SEC);
 
 	/* Add PM QoS for sysfs node */
+#if defined(CONFIG_EXYNOS_HOTPLUG_GOVERNOR)
 	pm_qos_add_request(&user_min_cpu_hotplug_request,
 		PM_QOS_CPU_ONLINE_MIN, PM_QOS_CPU_ONLINE_MIN_DEFAULT_VALUE);
 	pm_qos_add_request(&user_max_cpu_hotplug_request,
 		PM_QOS_CPU_ONLINE_MAX, PM_QOS_CPU_ONLINE_MAX_DEFAULT_VALUE);
+	pm_qos_add_request(&str_max_cpu_hotplug_request,
+		PM_QOS_CPU_ONLINE_MAX, PM_QOS_CPU_ONLINE_MAX_DEFAULT_VALUE);
+#else
+	pm_qos_add_request(&user_min_cpu_hotplug_request,
+		PM_QOS_CPU_ONLINE_MIN, PM_QOS_CPU_ONLINE_MAX_DEFAULT_VALUE);
+	pm_qos_add_request(&user_max_cpu_hotplug_request,
+		PM_QOS_CPU_ONLINE_MAX, PM_QOS_CPU_ONLINE_MAX_DEFAULT_VALUE);
+	pm_qos_add_request(&str_max_cpu_hotplug_request,
+		PM_QOS_CPU_ONLINE_MAX, PM_QOS_CPU_ONLINE_MAX_DEFAULT_VALUE);
+#endif
 }
 
 static void __init cpu_hotplug_sysfs_init(void)
@@ -506,10 +548,14 @@ static int __init cpu_hotplug_init(void)
 	cpu_hotplug_sysfs_init();
 
 	/* register pm notifier */
-	register_pm_notifier(&exynos_cpu_hotplug_nb);
+	register_pm_notifier(&exynos_cpu_hotplug_down_nb);
+	register_pm_notifier(&exynos_cpu_hotplug_up_nb);
 
 	/* Enable cpu_hotplug */
 	update_enable_flag(true);
+
+	/* Disable suspended flag */
+	update_suspend_flag(false);
 
 	return 0;
 }
