@@ -403,6 +403,7 @@ void mms_config_input(struct mms_ts_info *info)
 	set_bit(KEY_BACK, input_dev->keybit);
 	set_bit(KEY_MENU, input_dev->keybit);
 #endif
+	set_bit(KEY_POWER, input_dev->keybit);
 	set_bit(KEY_BLACK_UI_GESTURE, input_dev->keybit);
 	input_dbg(true, &info->client->dev, "%s [DONE]\n", __func__);
 	return;
