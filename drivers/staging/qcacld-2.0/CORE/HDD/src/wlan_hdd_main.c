@@ -10201,6 +10201,129 @@ static int hdd_set_mac_address(struct net_device *dev, void *addr)
 	return ret;
 }
 
+#ifdef SEC_READ_MACADDR
+
+#define SEC_MAC_FILEPATH	"/efs/wifi/.mac.info"
+
+v_MACADDR_t sec_mac_addrs[VOS_MAX_CONCURRENCY_PERSONA];
+static int sec_mac_loaded = 0;
+
+static int wlan_hdd_read_mac_addr(unsigned char *mac);
+
+unsigned char* wlan_hdd_sec_get_mac_addr(int i)
+{
+        tSirMacAddr customMacAddr;
+
+	if (!sec_mac_loaded) {
+		// station mac
+		if (wlan_hdd_read_mac_addr(sec_mac_addrs[0].bytes) < 0)
+			return NULL;	// Cannot read MAC
+
+		// hotspot mac == sta mac
+		memcpy(&sec_mac_addrs[1].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[1].bytes[0] |= 2;
+
+		// p2p mac
+		memcpy(&sec_mac_addrs[2].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[2].bytes[0] |= 4;
+
+		// monitor mac == sta mac
+		memcpy(&sec_mac_addrs[3].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[3].bytes[0] |= 8;
+
+                vos_mem_copy(&customMacAddr,
+                                &sec_mac_addrs[0].bytes[0],
+                                sizeof(tSirMacAddr));
+                sme_SetCustomMacAddr(customMacAddr);
+
+		sec_mac_loaded = 1;
+	}
+
+	return sec_mac_addrs[i].bytes;
+}
+
+static int wlan_hdd_read_mac_addr(unsigned char *mac)
+{
+	struct file *fp      = NULL;
+	char macbuffer[18]   = {0};
+	mm_segment_t oldfs   = {0};
+	char randommac[3]    = {0};
+	char buf[18]         = {0};
+	char *filepath       = SEC_MAC_FILEPATH;
+	int ret = 0;
+	int i;
+	int create_random_mac = 0;
+	struct dentry *parent;
+	struct dentry *dentry;
+	struct inode *p_inode;
+	struct inode *c_inode;
+
+	for (i = 0; i < 5; ++i) {
+		fp = filp_open(filepath, O_RDONLY, 0);
+		if (IS_ERR(fp) || create_random_mac ==1) {
+			/* File Doesn't Exist. Create and write mac addr.*/
+			fp = filp_open(filepath, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR);
+			if (IS_ERR(fp)) {
+				printk("[WIFI] %s: cannot create a file\n", filepath);
+				return -1;
+			}
+			oldfs = get_fs();
+			set_fs(get_ds());
+			/* set uid , gid of parent directory */
+			dentry = fp->f_path.dentry;
+			parent = dget_parent(dentry);
+			c_inode = dentry->d_inode;
+			p_inode = parent->d_inode;
+			c_inode->i_uid = p_inode->i_uid;
+			c_inode->i_gid = p_inode->i_gid;
+
+			/* Generating the Random Bytes for 3 last octects of the MAC address */
+			get_random_bytes(randommac, 3);
+
+			sprintf(macbuffer, "%02X:%02X:%02X:%02X:%02X:%02X\n",
+						0x00, 0x12, 0x34, randommac[0], randommac[1], randommac[2]);
+			//printk("[WIFI] The randomly generated MAC ID: %s", macbuffer);
+
+			if (fp->f_mode & FMODE_WRITE) {
+				ret = fp->f_op->write(fp, (const char *)macbuffer, sizeof(macbuffer), &fp->f_pos);
+				if (ret < 0)
+					printk("[WIFI] MAC write to %s is failed: %s", filepath, macbuffer);
+				else
+					printk("[WIFI] MAC write to %s is success: %s", filepath, macbuffer);
+			}
+			set_fs(oldfs);
+		}
+
+		/* Reading the MAC Address from .mac.info file (the existed file or just created file)*/
+		ret = kernel_read(fp, 0, buf, 17);
+		buf[17] = '\0';   // to prevent abnormal string display when mac address is displayed on the screen.
+		//printk("[WIFI] Read MAC: [%s]\n", buf);
+
+		if (ret != 17 || strncmp(buf, "00:00:00:00:00:00", 17) == 0) {
+			filp_close(fp, NULL);
+			create_random_mac = 1;
+			continue;// Retry!
+		}
+
+		break;	// Read MAC is success
+	}
+
+	if (fp)
+		filp_close(fp, NULL);
+
+	if (ret) {
+		sscanf(buf, "%02X:%02X:%02X:%02X:%02X:%02X",
+			   (unsigned int *)&(mac[0]), (unsigned int *)&(mac[1]),
+			   (unsigned int *)&(mac[2]), (unsigned int *)&(mac[3]),
+			   (unsigned int *)&(mac[4]), (unsigned int *)&(mac[5]));
+		return 0;	// success
+	}
+
+	printk("[WIFI] Reading MAC from the '%s' is failed.\n", filepath);
+	return -1;	// failed
+}
+#endif /* SEC_READ_MACADDR */
+
 tANI_U8* wlan_hdd_get_intf_addr(hdd_context_t* pHddCtx)
 {
    int i;
@@ -10214,15 +10337,38 @@ tANI_U8* wlan_hdd_get_intf_addr(hdd_context_t* pHddCtx)
       return NULL;
 
    pHddCtx->cfg_ini->intfAddrMask |= (1 << i);
+#ifdef SEC_READ_MACADDR
+   {
+	   tANI_U8* addr = wlan_hdd_sec_get_mac_addr(i);
+	   printk("Assigned Interface Index %d\n",i);
+	   if (addr != NULL)
+		   return addr;
+   }
+#endif /* SEC_READ_MACADDR */
+
    return &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0];
 }
 
 void wlan_hdd_release_intf_addr(hdd_context_t* pHddCtx, tANI_U8* releaseAddr)
 {
    int i;
+#ifdef SEC_READ_MACADDR
+   tANI_U8* addr;
+#endif /* SEC_READ_MACADDR */
+
    for ( i = 0; i < VOS_MAX_CONCURRENCY_PERSONA; i++)
    {
+#ifdef SEC_READ_MACADDR
+	   addr = wlan_hdd_sec_get_mac_addr(i);
+
+	   if (NULL == addr) {
+		   addr =
+			   &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0];
+	   }
+	   if ( !memcmp(releaseAddr, addr, 6) )
+#else
       if ( !memcmp(releaseAddr, &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0], 6) )
+#endif /* SEC_READ_MACADDR */
       {
          pHddCtx->cfg_ini->intfAddrMask &= ~(1 << i);
          break;
@@ -14256,6 +14402,10 @@ void __hdd_wlan_exit(void)
    memdump_deinit();
    hdd_driver_memdump_deinit();
    hdd_wlan_exit(pHddCtx);
+#ifdef SEC_READ_MACADDR
+   sec_mac_loaded = 0;
+#endif /* SEC_READ_MACADDR */
+
    EXIT();
 }
 
@@ -16275,6 +16425,19 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
       /* Open P2P device interface */
       if (pAdapter != NULL &&
           !hdd_cfg_is_sub20_channel_width_enabled(pHddCtx)) {
+#ifdef SEC_READ_MACADDR
+		  tANI_U8* p2p_dev_addr = wlan_hdd_get_intf_addr(pHddCtx);
+		  if (p2p_dev_addr != NULL) {
+			  vos_mem_copy(&pHddCtx->p2pDeviceAddress.bytes[0],
+					  p2p_dev_addr, VOS_MAC_ADDR_SIZE);
+
+			  if ( pHddCtx->cfg_ini->isP2pDeviceAddrAdministrated) {
+				  /* Generate the P2P Device Address.  This consists of the device's primary
+				   * MAC address with the locally administered bit set.
+				   */
+				  pHddCtx->p2pDeviceAddress.bytes[0] |= 0x02;
+			  }
+#else
          if (pHddCtx->cfg_ini->isP2pDeviceAddrAdministrated &&
              !(pHddCtx->cfg_ini->intfMacAddr[0].bytes[0] & 0x02)) {
             vos_mem_copy(pHddCtx->p2pDeviceAddress.bytes,
@@ -16285,6 +16448,7 @@ int hdd_wlan_startup(struct device *dev, v_VOID_t *hif_sc)
              * primary MAC address with the locally administered bit set.
              */
             pHddCtx->p2pDeviceAddress.bytes[0] |= 0x02;
+#endif
          } else {
             uint8_t* p2p_dev_addr = wlan_hdd_get_intf_addr(pHddCtx);
             if (p2p_dev_addr != NULL) {
